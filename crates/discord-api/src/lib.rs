@@ -15,6 +15,7 @@ mod message_options;
 mod messaging_permissions;
 mod onboarding;
 mod profile_edit;
+mod rate_limit;
 #[cfg(debug_assertions)]
 pub use profile_edit::debug_profile_board_request_check;
 pub mod proxy;
@@ -81,6 +82,7 @@ pub struct DiscordApi {
 	upload_client: tokio::sync::OnceCell<Client>,
 	secret: Arc<SessionSecret>,
 	cooldown: Mutex<Instant>,
+	rate_limits: rate_limit::Limits,
 	requests: Semaphore,
 	stopped: AtomicBool,
 	catalog: std::sync::Mutex<collectibles::Catalog>,
@@ -242,6 +244,7 @@ impl DiscordApi {
 			}),
 			secret,
 			cooldown: Mutex::new(Instant::now()),
+			rate_limits: rate_limit::Limits::default(),
 			requests: Semaphore::new(4),
 			stopped: AtomicBool::new(false),
 			catalog: std::sync::Mutex::default(),
@@ -392,24 +395,17 @@ impl DiscordApi {
 			return Err(Failure::Protocol);
 		}
 		let speculative = SPECULATIVE.try_with(|()| ()).is_ok();
-		let _permit = if speculative {
-			// A hover preload takes only spare capacity, so it never delays a click.
-			if self.requests.available_permits() <= FOREGROUND_PERMITS {
-				return Err(Failure::Capacity);
-			}
-			self.requests.try_acquire().map_err(|_| Failure::Capacity)?
-		} else {
-			self.requests
-				.acquire()
-				.await
-				.map_err(|_| Failure::Network)?
-		};
+		let route_key = rate_limit::route(&method, path);
 		// Four permits bound concurrent REST work. A slow profile body must not hold the
-		// cooldown mutex and delay a message write; only service rate admission is shared.
+		// cooldown mutex and delay a message write; route waits also happen before taking a permit.
 		let idempotent = method == Method::GET && body.is_none() && !speculative;
 		let mut body = body;
 		let mut rate_limits = 0u8;
 		loop {
+			self.rate_limits
+				.acquire(&route_key, speculative)
+				.await
+				.map_err(|()| Failure::Capacity)?;
 			loop {
 				let next = *self.cooldown.lock().await;
 				if speculative && Instant::now() < next {
@@ -423,6 +419,25 @@ impl DiscordApi {
 			if self.stopped() {
 				return Err(Failure::Expired);
 			}
+			let _permit = if speculative {
+				// A hover preload takes only spare capacity, so it never delays a click.
+				if self.requests.available_permits() <= FOREGROUND_PERMITS {
+					self.rate_limits.refund(&route_key);
+					return Err(Failure::Capacity);
+				}
+				match self.requests.try_acquire() {
+					Ok(permit) => permit,
+					Err(_) => {
+						self.rate_limits.refund(&route_key);
+						return Err(Failure::Capacity);
+					}
+				}
+			} else {
+				self.requests
+					.acquire()
+					.await
+					.map_err(|_| Failure::Network)?
+			};
 			let mut authorization = HeaderValue::from_str(self.secret.expose())
 				.map_err(|_| Failure::InvalidCredential)?;
 			authorization.set_sensitive(true);
@@ -471,11 +486,7 @@ impl DiscordApi {
 				}
 			})?;
 			let status = response.status();
-			let exhausted = response
-				.headers()
-				.get("x-ratelimit-remaining")
-				.and_then(|v| v.to_str().ok())
-				== Some("0");
+			let response_headers = response.headers().clone();
 			let reset = response
 				.headers()
 				.get("x-ratelimit-reset-after")
@@ -486,9 +497,8 @@ impl DiscordApi {
 				.get("retry-after")
 				.and_then(|v| v.to_str().ok())
 				.and_then(|s| s.parse::<f64>().ok());
-			if exhausted && status != StatusCode::TOO_MANY_REQUESTS {
-				let mut next = self.cooldown.lock().await;
-				*next = (*next).max(Instant::now() + safe_delay(reset)?);
+			if status != StatusCode::TOO_MANY_REQUESTS {
+				self.rate_limits.update(&route_key, &response_headers);
 			}
 			if status == StatusCode::UNAUTHORIZED {
 				self.stop();
@@ -569,10 +579,14 @@ impl DiscordApi {
 					// The body is the penalty Discord documents. A missing or shorter reset
 					// header must not send the retry early.
 					let delay = safe_delay(error.retry_after.or(retry_header).or(reset))?;
-					{
-						let mut next = self.cooldown.lock().await;
-						*next = (*next).max(Instant::now() + delay);
-					}
+					let rate_limit_body =
+						serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+					self.rate_limits.limited(
+						&route_key,
+						&response_headers,
+						&rate_limit_body,
+						delay,
+					);
 					if idempotent
 						&& delay <= MAX_READ_RATE_LIMIT_WAIT
 						&& rate_limits < READ_RATE_LIMIT_RETRIES
@@ -781,7 +795,7 @@ impl DiscordApi {
 	/// [`Self::execute`] for the write queue. Like the official client, a message Discord
 	/// rate-limits (documented: a 429 request is not processed, so nothing was created) stays
 	/// pending and is resent with the same nonce once the service's wait has passed; `execute`
-	/// sleeps out that shared cooldown first. `throttled` hears each wait. Ambiguous outcomes are
+	/// waits out Discord's route or global limit first. `throttled` hears each wait. Ambiguous outcomes are
 	/// never resent.
 	pub async fn execute_write(&self, command: Command, mut throttled: impl FnMut(&str)) -> Event {
 		/// Resends of one message, each after the wait Discord asked for.
