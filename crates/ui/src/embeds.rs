@@ -110,21 +110,83 @@ fn text(
 		&[model::Guild],
 		&crate::mentions::MentionSource<'_>,
 	),
-) {
+) -> egui::Response {
 	let (images, demo, guilds, source) = media;
 	let formatted = cache.get_part(message.id, part.0, part.1);
-	formatted.show_with_images(
-		ui,
-		opening,
-		&message.mentions,
-		Some(source),
-		profile,
-		(images, demo, guilds),
-		card_surface,
-	);
-	if formatted.limited {
-		ui.small(crate::i18n::translate("embeds-text-text-display-limited"));
+	ui.scope(|ui| {
+		formatted.show_with_images(
+			ui,
+			opening,
+			&message.mentions,
+			Some(source),
+			profile,
+			(images, demo, guilds),
+			card_surface,
+		);
+		if formatted.limited {
+			ui.small(crate::i18n::translate("embeds-text-text-display-limited"));
+		}
+	})
+	.response
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rich_text(
+	ui: &mut egui::Ui,
+	message: &Message,
+	part: u16,
+	value: &str,
+	strong: bool,
+	color: Option<egui::Color32>,
+	target: Option<&str>,
+	cache: &mut FormatCache,
+	opening: &mut Option<String>,
+	profile: &mut crate::profiles::ProfileSession,
+	card_surface: crate::design::MessageCardSurface,
+	images: &mut Avatars,
+	demo: bool,
+	state: &client_core::State,
+) -> egui::Response {
+	let source = crate::mentions::MentionSource {
+		state,
+		channel: message.channel,
+	};
+	let value = if strong {
+		format!("**{value}**")
+	} else {
+		value.to_owned()
+	};
+	let rendered = ui
+		.scope(|ui| {
+			if let Some(color) = color {
+				ui.visuals_mut().override_text_color = Some(color);
+			}
+			text(
+				ui,
+				message,
+				(part, &value),
+				cache,
+				opening,
+				profile,
+				card_surface,
+				(images, demo, &state.guilds, &source),
+			)
+		})
+		.response;
+	let Some(target) = target.and_then(external_url) else {
+		return rendered;
+	};
+	let response = ui
+		.interact(
+			rendered.rect,
+			rendered.id.with(("embed-rich-link", part)),
+			egui::Sense::click(),
+		)
+		.on_hover_cursor(egui::CursorIcon::PointingHand);
+	if response.clicked() {
+		*opening = Some(target);
 	}
+	response
 }
 pub fn standalone_media_links(message: &Message) -> bool {
 	!message.embeds_suppressed
@@ -654,12 +716,21 @@ pub fn show(
 								ui.vertical(|ui| {
 									ui.set_width(body_width);
 									if let Some(provider) = &embed.provider {
-										link(
+										rich_text(
 											ui,
+											message,
+											part + 32,
 											&provider.name,
-											provider.url.as_deref(),
-											opening,
 											false,
+											Some(colors.muted),
+											provider.url.as_deref(),
+											cache,
+											opening,
+											profile,
+											card_surface,
+											images,
+											demo,
+											state,
 										);
 									}
 									if let Some(author) = &embed.author {
@@ -676,12 +747,42 @@ pub fn show(
 													Surface::Inline,
 												);
 											}
-											author_name(ui, author, opening, colors.text_strong);
+											rich_text(
+												ui,
+												message,
+												part + 33,
+												&author.name,
+												true,
+												Some(colors.text_strong),
+												author.url.as_deref(),
+												cache,
+												opening,
+												profile,
+												card_surface,
+												images,
+												demo,
+												state,
+											);
 										});
 										ui.add_space(2.0);
 									}
 									if let Some(title) = &embed.title {
-										link(ui, title, embed.url.as_deref(), opening, true);
+										rich_text(
+											ui,
+											message,
+											part + 34,
+											title,
+											true,
+											Some(ui.visuals().hyperlink_color),
+											embed.url.as_deref(),
+											cache,
+											opening,
+											profile,
+											card_surface,
+											images,
+											demo,
+											state,
+										);
 									}
 									if let Some(description) = &embed.description {
 										text(
@@ -735,10 +836,21 @@ pub fn show(
 										// otherwise collide and clash (visible as egui's debug
 										// "used the same ID" warning in debug builds).
 										column.push_id(field + offset, |column| {
-											column.add(
-												egui::Label::new(RichText::new(&f.name).strong())
-													.wrap()
-													.selectable(true),
+											rich_text(
+												column,
+												message,
+												part + 35 + (field + offset) as u16,
+												&f.name,
+												true,
+												None,
+												None,
+												cache,
+												opening,
+												profile,
+												card_surface,
+												images,
+												demo,
+												state,
 											);
 											text(
 												column,
@@ -829,42 +941,30 @@ pub fn show(
 											Surface::Inline,
 										);
 									}
-									let line = match (footer_text, when.as_deref()) {
-										(Some(text), Some(when)) => format!("{text} • {when}"),
-										(Some(text), None) => text.to_owned(),
-										(None, Some(when)) => when.to_owned(),
-										(None, None) => String::new(),
-									};
-									let mut text =
-										RichText::new(line).size(12.0).color(colors.muted);
-									if source_url.is_some() {
-										text = text.underline();
+									if let Some(text) = footer_text {
+										rich_text(
+											ui,
+											message,
+											part + 60,
+											text,
+											false,
+											Some(colors.muted),
+											source_url.as_deref(),
+											cache,
+											opening,
+											profile,
+											card_surface,
+											images,
+											demo,
+											state,
+										);
 									}
-									let response = ui.add(
-										egui::Label::new(text)
-											.wrap()
-											.selectable(source_url.is_none())
-											.sense(if source_url.is_some() {
-												egui::Sense::click()
-											} else {
-												egui::Sense::hover()
-											}),
-									);
-									if let Some(url) = &source_url {
-										response.widget_info(|| {
-											egui::WidgetInfo::labeled(
-												egui::Role::Link,
-												ui.is_enabled(),
-												url,
-											)
-										});
-										if response
-											.on_hover_text(url)
-											.on_hover_cursor(egui::CursorIcon::PointingHand)
-											.clicked()
-										{
-											*opening = Some(url.clone());
-										}
+									if let Some(when) = when {
+										ui.label(
+											RichText::new(format!("• {when}"))
+												.size(12.0)
+												.color(colors.muted),
+										);
 									}
 								});
 							} else if let Some(url) = &source_url {
@@ -976,6 +1076,74 @@ pub fn estimated_height(embeds: &[Embed]) -> f32 {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn custom_emojis_render_in_every_text_section_of_an_embed() {
+		let mut message = test_support::message(1, model::Id(2));
+		message.embeds = vec![Embed {
+			kind: "rich".into(),
+			provider: Some(model::EmbedAuthor {
+				name: "<:provider:9003>".into(),
+				..Default::default()
+			}),
+			author: Some(model::EmbedAuthor {
+				name: "<:author:9004>".into(),
+				..Default::default()
+			}),
+			title: Some("<:title:9005>".into()),
+			description: Some("<:description:9006>".into()),
+			fields: vec![model::EmbedField {
+				name: "<:field_name:9007>".into(),
+				value: "<:field_value:9008>".into(),
+				inline: false,
+			}],
+			footer: Some(model::EmbedFooter {
+				text: "<:footer:9009>".into(),
+				..Default::default()
+			}),
+			..Default::default()
+		}];
+		let ctx = egui::Context::default();
+		let mut cache = FormatCache::default();
+		let mut images = Avatars::default();
+		let mut opening = None;
+		let state = client_core::State::default();
+		for _ in 0..2 {
+			ctx.run_ui(
+				egui::RawInput {
+					screen_rect: Some(egui::Rect::from_min_size(
+						egui::Pos2::ZERO,
+						egui::vec2(640.0, 700.0),
+					)),
+					..Default::default()
+				},
+				|ui| {
+					show(
+						ui,
+						&message,
+						&mut cache,
+						&mut images,
+						&mut opening,
+						&mut DownloadUi::default(),
+						&mut crate::profiles::ProfileSession::default(),
+						&state,
+						crate::design::MessageCardSurface::Conversation,
+						false,
+					);
+				},
+			)
+			.drop_without_applying_deltas();
+		}
+		let mut requests = images.take_requests();
+		requests.sort();
+		assert_eq!(
+			requests,
+			(9003..=9009)
+				.map(|id| format!("emoji-{id}"))
+				.collect::<Vec<_>>(),
+			"provider, author, title, description, fields and footer all request emoji artwork"
+		);
+	}
 
 	#[test]
 	fn source_fallback_requires_a_safe_url_without_an_existing_source_action() {
@@ -1514,41 +1682,4 @@ pub(crate) fn favorite_star(
 			crate::i18n::translate("embeds-show-save-to-gif-favorites")
 		}),
 	))
-}
-
-/// An embed author name: strong text that underlines on hover and opens its page if it has one.
-fn author_name(
-	ui: &mut egui::Ui,
-	author: &model::EmbedAuthor,
-	opening: &mut Option<String>,
-	color: egui::Color32,
-) {
-	let url = author.url.as_deref().and_then(external_url);
-	let response = ui.add(
-		egui::Label::new(RichText::new(&author.name).size(14.0).strong().color(color))
-			.wrap()
-			.sense(if url.is_some() {
-				egui::Sense::click()
-			} else {
-				egui::Sense::hover()
-			}),
-	);
-	if let Some(url) = url {
-		response.widget_info(|| {
-			egui::WidgetInfo::labeled(egui::Role::Link, ui.is_enabled(), &author.name)
-		});
-		if response.hovered() {
-			ui.painter().hline(
-				response.rect.x_range(),
-				response.rect.bottom(),
-				egui::Stroke::new(1.0, color),
-			);
-		}
-		if response
-			.on_hover_cursor(egui::CursorIcon::PointingHand)
-			.clicked()
-		{
-			*opening = Some(url);
-		}
-	}
 }

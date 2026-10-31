@@ -11,6 +11,8 @@ development-data = ["local-store/development-data", "platform/development-data"]
 # Kept only so `--features developer-session` in older scripts keeps building.
 developer-session = []
 demo = ["dep:test-support", "ui/demo"]
+# Private source builds must not replace local patches with upstream release binaries.
+custom-build = []
 
 [dependencies]
 extensions.workspace = true

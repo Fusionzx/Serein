@@ -323,6 +323,8 @@ pub struct MessagingUi {
 	edit_undo_cleared: bool,
 	edit_widget_id: Option<egui::Id>,
 	edit_closed_channel: Option<Id>,
+	/// Most recently submitted text, available for one Ctrl/Cmd+Z in the empty composer.
+	undo_sent: Option<(Id, Id, String)>,
 	avatars: avatars::Avatars,
 	profile: profiles::ProfileSession,
 	profile_image: Option<ProfileImage>,
@@ -2801,6 +2803,7 @@ impl MessagingUi {
 			return;
 		}
 		let draft = state.drafts.get(&channel).map_or("", String::as_str);
+		let sent_text = (!draft.is_empty()).then(|| draft.to_owned());
 		if self.selected_files().is_empty()
 			&& let Some(assets) = model::ImageShare::markdown_only(draft)
 		{
@@ -2828,6 +2831,9 @@ impl MessagingUi {
 				.map(|(name, _)| name.as_str())
 				.collect::<Vec<_>>(),
 		) {
+			if let (Some(user), Some(content)) = (state.user.as_ref(), sent_text) {
+				self.undo_sent = Some((user.id, channel, content));
+			}
 			// Consume this selection once, before desktop dispatch.
 			self.stage_pending_upload(ctx, &command);
 			self.timeline.follow_latest(state);
@@ -3646,6 +3652,28 @@ impl MessagingUi {
                         } else {
                             &mut new_draft
                         };
+		let restore_sent = !editing_here
+			&& draft.is_empty()
+			&& keyboard_enabled
+			&& !self.ime_active
+			&& !ime_this_frame
+			&& !egui::Popup::is_any_open(ctx)
+			&& self.undo_sent.as_ref().is_some_and(|(user, sent_channel, _)| {
+				Some(*user) == state.user.as_ref().map(|user| user.id)
+					&& *sent_channel == channel
+			})
+			&& ctx.input_mut(|input| {
+				crate::keybinds::pressed_exact(
+					input,
+					&model::KeyChord::new("Z", model::keybinds::PRIMARY),
+				)
+			});
+		if restore_sent
+			&& let Some((_, _, content)) = self.undo_sent.take()
+		{
+			*draft = content;
+			ctx.memory_mut(|memory| memory.request_focus(composer_id));
+		}
 						let mut mention_changed = false;
 						match self.apply_pending_mention(ctx, composer_id, draft, remaining, editing_here) {
 							None => {}
@@ -3850,6 +3878,10 @@ impl MessagingUi {
                         }
                         let edit = output.response;
                         let cleared = draft.is_empty();
+		if (edit.changed() && !cleared) || mention_changed {
+			// Start a normal edit history as soon as the user changes the restored-or-new draft.
+			self.undo_sent = None;
+		}
                         if edit.changed() || mention_changed {
                             if editing_here && let Some((_, _, modified)) = &mut self.edit_modified {
                                 *modified = true;
@@ -4869,7 +4901,19 @@ impl MessagingUi {
 					(warnings.sessions, "session status"),
 					(warnings.emojis, "some server emoji"),
 					(warnings.stickers, "some server stickers"),
-					(warnings.entries, "some malformed channels, DMs or contacts"),
+					(
+						warnings.guild_entries,
+						"some server channels, roles or members",
+					),
+					(warnings.private_channels, "some direct messages"),
+					(warnings.contacts, "some contacts"),
+					(
+						warnings.entries
+							&& !warnings.guild_entries
+							&& !warnings.private_channels
+							&& !warnings.contacts,
+						"some account entries",
+					),
 				]
 				.into_iter()
 				.filter_map(|(unavailable, label)| unavailable.then_some(label))
@@ -6134,9 +6178,73 @@ mod composer_tests {
 					assert!(commands.iter().any(
 						|command| matches!(command, Command::Send { content, .. } if content == expected)
 					));
+					assert_eq!(
+						view.undo_sent.as_ref().unwrap().2,
+						"Hello :)",
+						"undo restores the original draft before emoticon conversion"
+					);
 				}
 			}
 		}
+	}
+
+	#[test]
+	fn ctrl_z_restores_last_sent_text_once_only_in_empty_composer() {
+		let mut state = edit_state();
+		let channel = state.selected.unwrap();
+		let mut view = MessagingUi::default();
+		let ctx = egui::Context::default();
+		state.drafts.insert(channel, "testando".into());
+		let mut commands = Vec::new();
+		view.submit_composer(&mut state, &ctx, &mut commands);
+		assert!(
+			matches!(commands.as_slice(), [Command::Send { content, .. }] if content == "testando")
+		);
+		assert!(!state.drafts.contains_key(&channel));
+
+		let events = vec![egui::Event::Key {
+			key: egui::Key::Z,
+			physical_key: None,
+			pressed: true,
+			repeat: false,
+			modifiers: egui::Modifiers::COMMAND,
+		}];
+		let mut commands = Vec::new();
+		for events in [vec![], events] {
+			let output = ctx.run_ui(
+				egui::RawInput {
+					events,
+					..Default::default()
+				},
+				|ui| view.composer(ui, &mut state, channel, &ctx, &mut commands),
+			);
+			output.drop_without_applying_deltas();
+		}
+		assert_eq!(
+			state.drafts.get(&channel).map(String::as_str),
+			Some("testando")
+		);
+		assert!(view.undo_sent.is_none(), "sent-text recovery is one-shot");
+
+		let ctrl_z_again = egui::Event::Key {
+			key: egui::Key::Z,
+			physical_key: None,
+			pressed: true,
+			repeat: false,
+			modifiers: egui::Modifiers::COMMAND,
+		};
+		let output = ctx.run_ui(
+			egui::RawInput {
+				events: vec![ctrl_z_again],
+				..Default::default()
+			},
+			|ui| view.composer(ui, &mut state, channel, &ctx, &mut commands),
+		);
+		output.drop_without_applying_deltas();
+		assert_eq!(
+			state.drafts.get(&channel).map(String::as_str),
+			Some("testando")
+		);
 	}
 
 	#[test]

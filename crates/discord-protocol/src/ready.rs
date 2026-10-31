@@ -89,10 +89,11 @@ impl Envelope<'_> {
 		let guilds: Guilds = crate::decode_gateway(self.guilds.get().as_bytes())?;
 		warnings.emojis = guilds.emojis;
 		warnings.stickers = guilds.stickers;
-		let skipped = guilds.skipped
-			|| self.users.skipped
-			|| self.private_channels.skipped
-			|| self.relationships.as_ref().is_some_and(|r| r.1);
+		warnings.guild_entries = guilds.skipped;
+		warnings.private_channels = self.private_channels.skipped;
+		warnings.contacts = self.users.skipped || self.relationships.as_ref().is_some_and(|r| r.1);
+		warnings.entries = warnings.guild_entries || warnings.private_channels || warnings.contacts;
+		let skipped = warnings.entries;
 		let read_state = optional(self.read_state, &mut warnings.read_state);
 		let user_guild_settings = optional(self.user_guild_settings, &mut warnings.notifications)
 			.filter(|settings: &crate::notifications::Snapshot| {
@@ -225,6 +226,7 @@ pub fn supplemental(bytes: &[u8]) -> Result<(crate::ReadySupplemental, Warnings)
 		emojis: guilds.emojis,
 		stickers: guilds.stickers,
 		entries,
+		guild_entries: entries,
 		..Warnings::default()
 	};
 	let presences = checked_presences(raw.presences, &mut warnings.presence);
@@ -632,7 +634,11 @@ mod tests {
 			let bytes = serde_json::to_vec(&payload).unwrap();
 			let envelope = decode(&bytes).unwrap();
 			assert!(envelope.permissions().is_ok());
-			let (mut ready, _) = envelope.navigation().unwrap();
+			let (mut ready, warnings) = envelope.navigation().unwrap();
+			assert!(warnings.entries);
+			assert!(warnings.guild_entries);
+			assert!(warnings.private_channels);
+			assert!(warnings.contacts);
 			assert!(ready.skipped);
 			assert_eq!(ready.relationships.as_ref().unwrap().0.len(), 1);
 			let (guilds, channels) = ready.navigation().unwrap();
@@ -667,6 +673,9 @@ mod tests {
 					emojis: true,
 					stickers: false,
 					entries: false,
+					guild_entries: false,
+					private_channels: false,
+					contacts: false,
 				}
 			);
 			assert!(

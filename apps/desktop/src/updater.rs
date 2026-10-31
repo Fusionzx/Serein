@@ -154,7 +154,7 @@ impl Updater {
 		view.supported = supported;
 		view.flatpak = install::flatpak_session();
 		view.linux_update_cmd = install::linux_package_manager_update_command().map(str::to_owned);
-		if !enabled {
+		if !enabled || cfg!(feature = "custom-build") {
 			if let Some(job) = &self.job {
 				job.cancel.store(true, Ordering::Relaxed);
 			}
@@ -162,7 +162,9 @@ impl Updater {
 			view.available = false;
 			view.ready = false;
 			view.progress = None;
-			view.status = if cfg!(debug_assertions) {
+			view.status = if cfg!(feature = "custom-build") {
+				"Updates are disabled in this custom build. Rebuild it after updating the source."
+			} else if cfg!(debug_assertions) {
 				"Update checks are disabled in debug builds."
 			} else {
 				"Load update preferences or choose your update settings to enable checking."

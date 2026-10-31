@@ -16,4 +16,10 @@ pub struct Warnings {
 	pub stickers: bool,
 	/// Malformed or conflicting channels, DMs, contacts or members were dropped.
 	pub entries: bool,
+	/// Malformed server navigation, role or member entries were dropped.
+	pub guild_entries: bool,
+	/// Malformed direct-message channel entries were dropped.
+	pub private_channels: bool,
+	/// Malformed contact or relationship entries were dropped.
+	pub contacts: bool,
 }

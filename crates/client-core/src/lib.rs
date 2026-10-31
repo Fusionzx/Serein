@@ -2813,6 +2813,9 @@ impl State {
 				self.startup_warnings.emojis |= warnings.emojis;
 				self.startup_warnings.stickers |= warnings.stickers;
 				self.startup_warnings.entries |= warnings.entries;
+				self.startup_warnings.guild_entries |= warnings.guild_entries;
+				self.startup_warnings.private_channels |= warnings.private_channels;
+				self.startup_warnings.contacts |= warnings.contacts;
 				if warnings.read_state {
 					self.read_state.reset();
 				}
