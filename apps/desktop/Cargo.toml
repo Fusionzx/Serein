@@ -15,6 +15,7 @@ demo = ["dep:test-support", "ui/demo"]
 custom-build = []
 
 [dependencies]
+diagnostics.workspace = true
 extensions.workspace = true
 serde.workspace = true
 serde_json.workspace = true

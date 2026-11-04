@@ -636,10 +636,6 @@ impl State {
 			return;
 		}
 		if preload::is_preload(request) {
-			self.docked_arrived(
-				request,
-				result.as_ref().is_ok_and(|data| accepts(user, guild, data)),
-			);
 			match self.preload.profiles.arrived(request, result.is_ok()) {
 				preload::Arrival::Adopted(own, fresh)
 					if self
