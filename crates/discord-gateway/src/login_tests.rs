@@ -200,6 +200,7 @@ async fn optional_metadata_faults_do_not_abort_large_login() {
 			sessions: true,
 			presence: true,
 			emojis: true,
+			..Warnings::default()
 		},
 	)
 	.await;

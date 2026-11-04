@@ -2322,6 +2322,8 @@ mod tests {
 					position: 0,
 					hoist: false,
 					managed: false,
+					icon: None,
+					unicode_emoji: None,
 					id: Id(10),
 					bits,
 				}]),

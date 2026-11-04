@@ -219,10 +219,10 @@ fn expand_shortcodes(
 			offset += end + usize::from(wrapped_close);
 			continue;
 		}
-		if tail.starts_with("```") {
+		if let Some(after_fence) = tail.strip_prefix("```") {
 			if fence {
 				fence = false;
-			} else if tail[3..].contains("```") {
+			} else if after_fence.contains("```") {
 				// Only a paired fence protects the rest of the description. A stray
 				// triple-backtick must not disable shortcode expansion to end of embed.
 				fence = true;

@@ -37,6 +37,22 @@ if (Get-Process -Name 'serein' -ErrorAction SilentlyContinue) {
 	throw 'Close Serein before running this update so its executable can be replaced.'
 }
 
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+	$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+	if (Test-Path -LiteralPath $vswhere) {
+		$visualStudio = (& $vswhere -latest -products '*' -property installationPath).Trim()
+		if ($LASTEXITCODE -eq 0 -and $visualStudio) {
+			$cmakeBin = Join-Path $visualStudio 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'
+			if (Test-Path -LiteralPath (Join-Path $cmakeBin 'cmake.exe')) {
+				$env:PATH = "$cmakeBin;$env:PATH"
+			}
+		}
+	}
+}
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+	throw 'CMake was not found. Install the CMake component in Visual Studio Build Tools and rerun this script.'
+}
+
 $headers = @{ 'User-Agent' = 'Serein-Custom-Nightly-Updater' }
 $releases = Invoke-RestMethod -Method Get -Uri 'https://api.github.com/repos/ViceVerse-cz/Serein/releases?per_page=100' -Headers $headers
 $release = $releases |
@@ -62,7 +78,7 @@ Write-Host 'Running the repository checks...'
 Invoke-Checked -FilePath 'cargo' -Arguments @('xtask', 'check')
 
 Write-Host 'Building the customized release with fat LTO...'
-Invoke-Checked -FilePath 'cargo' -Arguments @('build', '--locked', '--release', '-p', 'serein', '--features', 'custom-build')
+Invoke-Checked -FilePath 'cargo' -Arguments @('build', '--locked', '--release', '-p', 'serein', '--no-default-features', '--features', 'custom-build')
 
 $binary = Join-Path $repository 'target\release\serein.exe'
 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {

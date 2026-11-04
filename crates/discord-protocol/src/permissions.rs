@@ -972,13 +972,13 @@ mod tests {
 				json!({"guilds":[{"id":"1","channels":[{"id":"2","guild_id":"3","type":0}]}]}),
 			);
 			assert!(crossed.channels.is_empty());
-			for roles in [json!([{"id":"1","permissions":"8"},{"id":"1","permissions":"0"}])] {
-				assert!(
-					snapshot(json!({"guilds":[{"id":"1","roles":roles}]})).guilds[0]
-						.roles
-						.is_none()
-				);
-			}
+			let duplicate_roles =
+				json!([{"id":"1","permissions":"8"},{"id":"1","permissions":"0"}]);
+			assert!(
+				snapshot(json!({"guilds":[{"id":"1","roles":duplicate_roles}]})).guilds[0]
+					.roles
+					.is_none()
+			);
 			let roles = snapshot(json!({"guilds":[{"id":"1","roles":[
 				{"id":"1","permissions":"8","name":"@everyone"},
 				{"id":"2","permissions":"invalid","name":"Quartzo"},

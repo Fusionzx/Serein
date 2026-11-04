@@ -546,10 +546,11 @@ mod tests {
 			payload["guilds"][0]["roles"] = json!([{"id":"1","permissions":"invalid"}]);
 			let bytes = serde_json::to_vec(&payload).unwrap();
 			let permissions = decode(&bytes).unwrap().permissions().unwrap();
-			assert!(
-				permissions.guilds[0].roles.is_none(),
-				"Unreadable roles stay unknown"
-			);
+			let roles = permissions.guilds[0]
+				.roles
+				.as_ref()
+				.expect("READY keeps the role's usable identity");
+			assert_eq!(roles[0].bits, 0, "Invalid permissions never grant bits");
 			for fault in [
 				json!({"id":"1","channels":[{"id":"2","type":0},{"id":"2","type":0}]}),
 				json!({"id":"1","channels":[{"id":"2","guild_id":"3","type":0}]}),
