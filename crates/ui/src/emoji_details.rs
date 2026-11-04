@@ -36,21 +36,24 @@ pub(crate) fn shortcode(text: &str) -> String {
 fn source<'a>(
 	text: &str,
 	guilds: &'a [model::Guild],
+	preferred_guild: Option<model::Id>,
 ) -> Option<(&'a model::Guild, &'a model::CustomEmoji)> {
 	let (id, _) = emoji::custom_prefix(text)?;
-	guilds.iter().find_map(|guild| {
-		guild
-			.emojis
-			.as_ref()?
-			.iter()
-			.find(|emoji| emoji.id == id)
-			.map(|emoji| (guild, emoji))
-	})
+	let guild = guilds
+		.iter()
+		.find(|guild| Some(guild.id) == preferred_guild)?;
+	let emoji = guild.emojis.as_ref()?.iter().find(|emoji| emoji.id == id)?;
+	Some((guild, emoji))
 }
 
 /// Name shown for message emoji: the catalog's current name when its server is joined.
-pub(crate) fn name(text: &str, guilds: &[model::Guild]) -> String {
-	source(text, guilds).map_or_else(|| shortcode(text), |(_, emoji)| format!(":{}:", emoji.name))
+pub(crate) fn name(
+	text: &str,
+	guilds: &[model::Guild],
+	preferred_guild: Option<model::Id>,
+) -> String {
+	source(text, guilds, preferred_guild)
+		.map_or_else(|| shortcode(text), |(_, emoji)| format!(":{}:", emoji.name))
 }
 
 /// Hover card shared by message emoji and stickers: artwork beside its name, and a hint when
@@ -92,6 +95,7 @@ pub(crate) fn show(
 	text: &str,
 	image: Option<egui::Image<'static>>,
 	guilds: &[model::Guild],
+	preferred_guild: Option<model::Id>,
 ) {
 	if !ui.is_enabled() {
 		egui::Popup::close_id(ui.ctx(), response.id.with("emoji-details"));
@@ -112,7 +116,7 @@ pub(crate) fn show(
 		)
 		.show(|ui| {
 			let custom = emoji::custom_prefix(text);
-			let source = source(text, guilds);
+			let source = source(text, guilds, preferred_guild);
 			ui.set_width(width - 32.0);
 			ui.horizontal_top(|ui| {
 				let (rect, _) =
@@ -132,7 +136,7 @@ pub(crate) fn show(
 				ui.add_space(12.0);
 				ui.vertical(|ui| {
 					ui.set_width(ui.available_width().max(52.0));
-					let name = name(text, guilds);
+					let name = name(text, guilds, preferred_guild);
 					ui.add(
 						egui::Label::new(
 							design::semibold(ui, name, 16.0).color(colors.text_strong),
@@ -178,4 +182,31 @@ pub(crate) fn show(
 			ui.close();
 		}
 	});
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn custom_emoji_hover_source_is_limited_to_the_message_server() {
+		let guilds = [model::Guild {
+			id: model::Id(1),
+			name: "Unrelated server".into(),
+			emojis: Some(vec![model::CustomEmoji {
+				id: model::Id(123),
+				name: "on".into(),
+				animated: false,
+				available: true,
+				managed: false,
+				roles: None,
+			}]),
+			default_message_notifications: None,
+			stickers: None,
+			icon: None,
+		}];
+		assert_eq!(name("<:on:123>", &guilds, Some(model::Id(1))), ":on:");
+		assert_eq!(name("<:on:123>", &guilds, Some(model::Id(2))), ":on:");
+		assert_eq!(name("<:on:123>", &guilds, None), ":on:");
+	}
 }

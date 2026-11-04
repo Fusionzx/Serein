@@ -7,6 +7,7 @@ use crate::{
 use egui::RichText;
 use model::{Embed, Gif, Message};
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::OnceLock;
 
 pub fn has_spoilers(message: &Message) -> bool {
 	has_media_spoilers(message) || message.content.contains("||")
@@ -112,7 +113,12 @@ fn text(
 	),
 ) -> egui::Response {
 	let (images, demo, guilds, source) = media;
-	let formatted = cache.get_part(message.id, part.0, part.1);
+	let preferred_guild = source
+		.state
+		.channel(source.channel)
+		.and_then(|channel| channel.guild);
+	let expanded = expand_shortcodes(part.1, guilds, preferred_guild, message, source);
+	let formatted = cache.get_part(message.id, part.0, &expanded);
 	ui.scope(|ui| {
 		formatted.show_with_images(
 			ui,
@@ -128,6 +134,169 @@ fn text(
 		}
 	})
 	.response
+}
+
+/// Discord's embed text may contain Unicode emoji names even when the wire text is literal.
+/// Leave code spans and fenced examples alone.
+fn expand_shortcodes(
+	source: &str,
+	guilds: &[model::Guild],
+	preferred_guild: Option<model::Id>,
+	message: &Message,
+	mention_source: &crate::mentions::MentionSource<'_>,
+) -> String {
+	static NAMES: OnceLock<std::collections::HashMap<String, &'static str>> = OnceLock::new();
+	let names = NAMES.get_or_init(|| {
+		let mut names = std::collections::HashMap::new();
+		for ((emoji, _), (_, _, aliases)) in crate::emoji_picker::standard()
+			.iter()
+			.zip(crate::emoji_picker::discord_names())
+		{
+			for alias in aliases.split(',') {
+				names.insert(alias.to_ascii_lowercase(), *emoji);
+			}
+		}
+		names
+	});
+	let mut output = String::with_capacity(source.len());
+	let mut offset = 0;
+	let mut fence = false;
+	let mut inline = false;
+	while offset < source.len() {
+		let tail = &source[offset..];
+		// Preserve complete Discord emoji and mention tokens. In particular, the numeric
+		// suffix of <:name:id> is an emoji ID, never a user mention candidate.
+		if !fence && let Some((_, len)) = model::user_mention_prefix(tail) {
+			output.push_str(&tail[..len]);
+			offset += len;
+			continue;
+		}
+		if !fence && let Some((_, len)) = model::role_mention_prefix(tail) {
+			output.push_str(&tail[..len]);
+			offset += len;
+			continue;
+		}
+		if !fence && let Some((_, len)) = model::channel_mention_prefix(tail) {
+			output.push_str(&tail[..len]);
+			offset += len;
+			continue;
+		}
+		if !fence && let Some((_, len)) = crate::emoji::custom_prefix(tail) {
+			output.push_str(&tail[..len]);
+			offset += len;
+			continue;
+		}
+		let has_at = tail.starts_with('@');
+		let digits_start = usize::from(has_at);
+		if !fence
+			&& !inline
+			&& (has_at
+				|| offset == 0
+				|| !source[..offset]
+					.chars()
+					.next_back()
+					.is_some_and(|c| c.is_alphanumeric() || c == '_'))
+			&& let digit_count = tail[digits_start..]
+				.bytes()
+				.take_while(u8::is_ascii_digit)
+				.count() && (18..=20).contains(&digit_count)
+			&& let Some(end) = digits_start.checked_add(digit_count)
+			&& tail
+				.as_bytes()
+				.get(end)
+				.is_none_or(|byte| !byte.is_ascii_digit())
+			&& let Ok(id) = tail[digits_start..end].parse::<u64>()
+			&& crate::mentions::find_user(model::Id(id), &message.mentions, Some(mention_source))
+				.is_some()
+		{
+			output.push_str("<@");
+			output.push_str(&tail[digits_start..end]);
+			output.push('>');
+			let wrapped_close = !has_at
+				&& offset > 0
+				&& source[..offset].ends_with('>')
+				&& tail[end..].starts_with('>');
+			offset += end + usize::from(wrapped_close);
+			continue;
+		}
+		if tail.starts_with("```") {
+			if fence {
+				fence = false;
+			} else if tail[3..].contains("```") {
+				// Only a paired fence protects the rest of the description. A stray
+				// triple-backtick must not disable shortcode expansion to end of embed.
+				fence = true;
+			}
+			output.push_str("```");
+			offset += 3;
+			continue;
+		}
+		if tail.starts_with('`') && !fence {
+			if inline || tail[1..].contains('`') {
+				inline = !inline;
+			}
+			output.push('`');
+			offset += 1;
+			continue;
+		}
+		if !fence
+			&& !inline
+			&& tail.starts_with(':')
+			&& let Some(end) = tail[1..].find(':').map(|end| end + 2)
+			&& (3..=66).contains(&end)
+			&& tail[1..end - 1]
+				.bytes()
+				.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'+' | b'-'))
+		{
+			let name = &tail[1..end - 1];
+			let custom = preferred_guild
+				.and_then(|guild| guilds.iter().find(|entry| entry.id == guild))
+				.and_then(|guild| guild.emojis.as_deref())
+				.and_then(|emojis| {
+					emojis
+						.iter()
+						.find(|emoji| emoji.name.eq_ignore_ascii_case(name))
+				});
+			if let Some(custom) = custom {
+				output.push_str(if custom.animated { "<a:" } else { "<:" });
+				output.push_str(&custom.name);
+				output.push(':');
+				output.push_str(&custom.id.to_string());
+				output.push('>');
+			} else if let Some(emoji) = names.get(&name.to_ascii_lowercase()) {
+				output.push_str(emoji);
+			} else if let Some(flag) = country_flag_shortcode(name) {
+				output.push_str(&flag);
+			} else {
+				output.push_str(&tail[..end]);
+			}
+			offset += end;
+			continue;
+		}
+		let character = tail.chars().next().expect("nonempty tail");
+		output.push(character);
+		offset += character.len_utf8();
+	}
+	output
+}
+
+fn country_flag_shortcode(name: &str) -> Option<String> {
+	let code = name.strip_prefix("flag_")?;
+	let [first, second] = code.as_bytes() else {
+		return None;
+	};
+	if !first.is_ascii_alphabetic() || !second.is_ascii_alphabetic() {
+		return None;
+	}
+	Some(
+		[
+			0x1f1e6 + u32::from(first.to_ascii_uppercase() - b'A'),
+			0x1f1e6 + u32::from(second.to_ascii_uppercase() - b'A'),
+		]
+		.into_iter()
+		.filter_map(char::from_u32)
+		.collect(),
+	)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -684,9 +853,11 @@ pub fn show(
 				return;
 			}
 			let colors = crate::design::palette(ui);
-			let color = embed.color.map_or(colors.accent, |c| {
-				egui::Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
-			});
+			let color = cache
+				.embed_color(message.id, index, embed.color)
+				.map_or(colors.muted, |c| {
+					egui::Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+				});
 			let width = ui.available_width().min(480.0);
 			let frame = egui::Frame::new()
 				.fill(card_surface.fill(ui, colors.raised))
@@ -1076,6 +1247,109 @@ pub fn estimated_height(embeds: &[Embed]) -> f32 {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn embed_shortcodes_keep_code_and_unknown_names_literal() {
+		let state = client_core::State::default();
+		let message = test_support::message(1, model::Id(2));
+		let source = crate::mentions::MentionSource {
+			state: &state,
+			channel: model::Id(2),
+		};
+		assert_eq!(
+			expand_shortcodes(
+				":flag_br: :flag_us: :second_place: `:flag_us:` ```\n:flag_ca:\n``` :not_an_emoji:",
+				&[],
+				None,
+				&message,
+				&source
+			),
+			"🇧🇷 🇺🇸 🥈 `:flag_us:` ```\n:flag_ca:\n``` :not_an_emoji:"
+		);
+		assert_eq!(
+			expand_shortcodes(
+				"Here:**```yaml\n:second_place: :flag_us:",
+				&[],
+				None,
+				&message,
+				&source
+			),
+			"Here:**```yaml\n🥈 🇺🇸"
+		);
+	}
+
+	#[test]
+	fn server_shortcode_wins_only_when_it_belongs_to_the_message_guild() {
+		let state = client_core::State::default();
+		let message = test_support::message(1, model::Id(2));
+		let source = crate::mentions::MentionSource {
+			state: &state,
+			channel: model::Id(2),
+		};
+		let guild = model::Guild {
+			id: model::Id(1),
+			name: "Synthetic".into(),
+			emojis: Some(vec![model::CustomEmoji {
+				id: model::Id(123),
+				name: "alien".into(),
+				animated: false,
+				available: true,
+				managed: false,
+				roles: None,
+			}]),
+			default_message_notifications: None,
+			stickers: None,
+			icon: None,
+		};
+		assert_eq!(
+			expand_shortcodes(
+				"<@&834057797645631598> <:Vida:679480364489768970> <@644407668659978248> :alien:",
+				&[guild],
+				None,
+				&message,
+				&source
+			),
+			"<@&834057797645631598> <:Vida:679480364489768970> <@644407668659978248> 👽"
+		);
+	}
+
+	#[test]
+	fn embed_snowflakes_next_to_custom_emoji_resolve_as_users_without_bracket_leaks() {
+		let state = client_core::State::default();
+		let mut message = test_support::message(1, model::Id(2));
+		let mut user = message.author.clone();
+		user.id = model::Id(644407668659978248);
+		user.name = "Ranked player".into();
+		message.mentions.push(user);
+		let source = crate::mentions::MentionSource {
+			state: &state,
+			channel: model::Id(2),
+		};
+		assert_eq!(
+			expand_shortcodes(
+				"<:Vida:679480364489768970>644407668659978248>",
+				&[],
+				None,
+				&message,
+				&source
+			),
+			"<:Vida:679480364489768970><@644407668659978248>"
+		);
+	}
+
+	#[test]
+	fn embed_keeps_known_color_when_a_later_payload_omits_it() {
+		let mut cache = FormatCache::default();
+		let message = model::Id(42);
+		assert_eq!(
+			cache.embed_color(message, 0, Some(0xc76137)),
+			Some(0xc76137)
+		);
+		assert_eq!(cache.embed_color(message, 0, None), Some(0xc76137));
+		assert_eq!(cache.embed_color(message, 1, None), None);
+		cache.retain(|_| false);
+		assert_eq!(cache.embed_color(message, 0, None), None);
+	}
 
 	#[test]
 	fn custom_emojis_render_in_every_text_section_of_an_embed() {

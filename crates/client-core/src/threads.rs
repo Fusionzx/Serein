@@ -331,6 +331,8 @@ mod tests {
 							bits: model::permissions::VIEW_CHANNEL
 								| model::permissions::READ_MESSAGE_HISTORY
 								| model::permissions::SEND_MESSAGES_IN_THREADS,
+							icon: None,
+							unicode_emoji: None,
 						}]),
 						member: Some(model::permissions::Member {
 							roles: vec![],

@@ -200,7 +200,7 @@ fn format_header(
 	twelve: bool,
 	order: DateOrder,
 ) -> String {
-	let clock = format_clock(at, false, twelve);
+	let clock = format_clock(at, true, twelve);
 	if at.date() == today {
 		clock
 	} else if today.previous_day() == Some(at.date()) {
@@ -223,7 +223,7 @@ pub fn full(utc: time::OffsetDateTime) -> String {
 
 fn format_full(at: time::OffsetDateTime, twelve: bool, order: DateOrder) -> String {
 	let date = at.date();
-	let clock = format_clock(at, false, twelve);
+	let clock = format_clock(at, true, twelve);
 	match order {
 		DateOrder::MonthDayYear => format!(
 			"{}, {} {}, {} at {clock}",
@@ -354,40 +354,40 @@ mod tests {
 			|at, twelve, order| plain(super::format_header(local_at(at), today, twelve, order));
 		assert_eq!(
 			header("2026-10-14T15:45:00+02:00", true, MonthDayYear),
-			"3:45 PM"
+			"3:45:00 PM"
 		);
 		assert_eq!(
 			header("2026-10-14T15:45:00+02:00", false, DayMonthYear),
-			"15:45"
+			"15:45:00"
 		);
 		assert_eq!(
 			header("2026-10-13T15:45:00+02:00", true, MonthDayYear),
-			"Yesterday at 3:45 PM"
+			"Yesterday at 3:45:00 PM"
 		);
 		assert_eq!(
 			header("2026-10-13T15:45:00+02:00", false, DayMonthYearDots),
-			"Yesterday at 15:45"
+			"Yesterday at 15:45:00"
 		);
 		// Older days in the same year and earlier years both carry the full date.
 		assert_eq!(
 			header("2026-10-12T15:45:00+02:00", true, MonthDayYear),
-			"10/12/2026 3:45 PM"
+			"10/12/2026 3:45:00 PM"
 		);
 		assert_eq!(
 			header("2025-04-14T11:22:00+01:00", false, DayMonthYear),
-			"14/04/2025 11:22"
+			"14/04/2025 11:22:00"
 		);
 		assert_eq!(
 			header("2025-04-14T11:22:00+01:00", false, DayMonthYearDots),
-			"14.04.2025 11:22"
+			"14.04.2025 11:22:00"
 		);
 		assert_eq!(
 			header("2025-04-14T09:05:00+09:00", false, YearMonthDay),
-			"2025/04/14 09:05"
+			"2025/04/14 09:05:00"
 		);
 		assert_eq!(
 			header("2025-04-14T09:05:00-05:00", true, YearMonthDayDashes),
-			"2025-04-14 9:05 AM"
+			"2025-04-14 9:05:00 AM"
 		);
 	}
 
@@ -403,11 +403,11 @@ mod tests {
 				super::DateOrder::DayMonthYear,
 			))
 		};
-		assert_eq!(header("2026-10-14T00:00:00+02:00"), "00:00");
-		assert_eq!(header("2026-10-14T23:59:00+02:00"), "23:59");
-		assert_eq!(header("2026-10-13T23:59:00+02:00"), "Yesterday at 23:59");
-		assert_eq!(header("2026-10-13T00:00:00+02:00"), "Yesterday at 00:00");
-		assert_eq!(header("2026-10-12T23:59:00+02:00"), "12/10/2026 23:59");
+		assert_eq!(header("2026-10-14T00:00:00+02:00"), "00:00:00");
+		assert_eq!(header("2026-10-14T23:59:00+02:00"), "23:59:00");
+		assert_eq!(header("2026-10-13T23:59:00+02:00"), "Yesterday at 23:59:00");
+		assert_eq!(header("2026-10-13T00:00:00+02:00"), "Yesterday at 00:00:00");
+		assert_eq!(header("2026-10-12T23:59:00+02:00"), "12/10/2026 23:59:00");
 		// Year and month boundaries still count as yesterday.
 		let new_year = time::Date::from_calendar_date(2026, time::Month::January, 1).unwrap();
 		assert_eq!(
@@ -417,7 +417,7 @@ mod tests {
 				true,
 				super::DateOrder::MonthDayYear
 			)),
-			"Yesterday at 11:30 PM"
+			"Yesterday at 11:30:00 PM"
 		);
 		// The instant's own offset decides its day: 23:30 UTC is already tomorrow in Prague.
 		let utc = local_at("2026-10-13T23:30:00Z");
@@ -428,7 +428,7 @@ mod tests {
 				false,
 				super::DateOrder::DayMonthYear
 			),
-			"01:30"
+			"01:30:00"
 		);
 	}
 

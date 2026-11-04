@@ -380,11 +380,13 @@ pub struct Formatted {
 #[derive(Default)]
 pub struct FormatCache {
 	entries: HashMap<(Id, u16), (String, Formatted, u64)>,
+	embed_colors: HashMap<(Id, usize), (u32, u64)>,
 	bytes: usize,
 	clock: u64,
 }
 impl FormatCache {
 	pub fn retain(&mut self, mut keep: impl FnMut(Id) -> bool) {
+		self.embed_colors.retain(|(id, _), _| keep(*id));
 		self.entries.retain(|(id, _), (source, parsed, _)| {
 			if keep(*id) {
 				true
@@ -393,6 +395,28 @@ impl FormatCache {
 				false
 			}
 		});
+	}
+	pub(crate) fn embed_color(
+		&mut self,
+		message: Id,
+		index: usize,
+		color: Option<u32>,
+	) -> Option<u32> {
+		self.clock += 1;
+		let key = (message, index);
+		if let Some(color) = color {
+			self.embed_colors.insert(key, (color, self.clock));
+			if self.embed_colors.len() > 512 {
+				let oldest = *self.embed_colors.iter().min_by_key(|(_, value)| value.1)?.0;
+				self.embed_colors.remove(&oldest);
+			}
+			Some(color)
+		} else {
+			self.embed_colors.get_mut(&key).map(|entry| {
+				entry.1 = self.clock;
+				entry.0
+			})
+		}
 	}
 	pub fn get(&mut self, id: Id, source: &str) -> &Formatted {
 		self.get_part(id, 0, source)
@@ -662,12 +686,25 @@ fn normalize_fences(input: &str) -> std::borrow::Cow<'_, str> {
 				i = close_end;
 				continue;
 			}
+			let line_start = input[..at].rfind('\n').map_or(0, |n| n + 1);
+			if !input[line_start..at].trim().is_empty() {
+				// Discord embed descriptions can put a fence directly after formatted text
+				// (`**label:**```yaml`). A dangling emphasis marker cannot span a code block;
+				// drop the adjacent pair instead of showing it literally before the block.
+				let out = out.get_or_insert_with(|| String::with_capacity(input.len() + 8));
+				let prefix_end = at - usize::from(input[..at].ends_with("**")) * 2;
+				out.push_str(&input[copied..prefix_end]);
+				out.push('\n');
+				copied = at;
+			}
 			open = true;
 			i = line_end;
 			continue;
 		}
 		let line_start = input[..at].rfind('\n').map_or(0, |n| n + 1);
 		let own_line = input[line_start..at].trim().is_empty();
+		let trailing_bold = input[run_end..line_end].starts_with("**")
+			&& input[run_end + 2..line_end].trim().is_empty();
 		let trailing = input[run_end..line_end].trim().is_empty();
 		if !own_line || !trailing {
 			let out = out.get_or_insert_with(|| String::with_capacity(input.len() + 8));
@@ -679,12 +716,19 @@ fn normalize_fences(input: &str) -> std::borrow::Cow<'_, str> {
 			if !trailing {
 				out.push_str(&input[copied..run_end]);
 				out.push('\n');
-				copied = run_end;
+				copied = run_end + usize::from(trailing_bold) * 2;
 			}
+		}
+		if trailing && let Some(marker) = dangling_bold_suffix(input, line_end) {
+			let out = out.get_or_insert_with(|| String::with_capacity(input.len()));
+			out.push_str(&input[copied..marker.start]);
+			copied = marker.end;
 		}
 		open = false;
 		i = run_end;
 	}
+	// Discord accepts an unclosed fence through the end of the message. The parser
+	// already bounds input size, so preserve that behavior for embed code examples too.
 	match out {
 		Some(mut out) => {
 			out.push_str(&input[copied..]);
@@ -692,6 +736,89 @@ fn normalize_fences(input: &str) -> std::borrow::Cow<'_, str> {
 		}
 		None => std::borrow::Cow::Borrowed(input),
 	}
+}
+
+/// A lone closing `**` after a fenced block cannot pair across the block in Discord embeds.
+/// Remove it when it is the final non-whitespace line so it does not leak as literal stars.
+fn dangling_bold_suffix(input: &str, after_fence_line: usize) -> Option<std::ops::Range<usize>> {
+	let mut start = after_fence_line;
+	while start < input.len() && input.as_bytes()[start].is_ascii_whitespace() {
+		start += 1;
+	}
+	let end = start.checked_add(2)?;
+	if !input[start..].starts_with("**") || !input.is_char_boundary(end) {
+		return None;
+	}
+	input[end..].trim().is_empty().then_some(start..end)
+}
+
+/// Discord embed text can contain a stray `**` around prose adjacent to code blocks. CommonMark
+/// leaves an unmatched opener visible; Discord's embed renderer drops it. Remove only
+/// unmatched, unescaped bold openers outside inline and fenced code, preserving valid pairs and
+/// literal closing runs used in URLs.
+fn strip_unmatched_bold(input: &str) -> std::borrow::Cow<'_, str> {
+	let mut remove = Vec::new();
+	let mut openers = Vec::new();
+	let mut inline = false;
+	let mut fence = false;
+	let mut i = 0;
+	let flush = |remove: &mut Vec<std::ops::Range<usize>>,
+	             openers: &mut Vec<std::ops::Range<usize>>| {
+		remove.append(openers);
+	};
+	while i < input.len() {
+		let tail = &input[i..];
+		if tail.starts_with("```") {
+			fence = !fence;
+			inline = false;
+			i += 3;
+			continue;
+		}
+		if fence {
+			i += tail.chars().next().map_or(1, char::len_utf8);
+			continue;
+		}
+		if tail.starts_with('`') {
+			inline = !inline;
+			i += 1;
+			continue;
+		}
+		if tail.starts_with('\n') {
+			if tail.starts_with("\n\n") {
+				flush(&mut remove, &mut openers);
+			}
+			i += 1;
+			continue;
+		}
+		if !inline && tail.starts_with("**") && !escaped(input, i) {
+			let before = input[..i].chars().next_back();
+			let after = input[i + 2..].chars().next();
+			let can_open = after.is_some_and(|chr| !chr.is_whitespace());
+			let can_close = before.is_some_and(|chr| !chr.is_whitespace());
+			let token = i..i + 2;
+			if can_close && !openers.is_empty() {
+				openers.pop();
+			} else if can_open {
+				openers.push(token);
+			}
+			i += 2;
+			continue;
+		}
+		i += tail.chars().next().map_or(1, char::len_utf8);
+	}
+	flush(&mut remove, &mut openers);
+	if remove.is_empty() {
+		return input.into();
+	}
+	remove.sort_by_key(|range| range.start);
+	let mut output = String::with_capacity(input.len());
+	let mut copied = 0;
+	for range in remove {
+		output.push_str(&input[copied..range.start]);
+		copied = range.end;
+	}
+	output.push_str(&input[copied..]);
+	output.into()
 }
 
 /// Discord quotes a line only for `> ` or `>>> ` (a space after the marker); CommonMark also
@@ -761,6 +888,12 @@ struct Render<'a> {
 	/// Row height reserved for artwork, so emoji and text share one baseline.
 	line: Option<f32>,
 	card_surface: crate::design::MessageCardSurface,
+}
+
+fn message_guild(source: Option<&crate::mentions::MentionSource<'_>>) -> Option<Id> {
+	source
+		.and_then(|source| source.state.channel(source.channel))
+		.and_then(|channel| channel.guild)
 }
 
 /// Whitespace, controls and zero-width characters: content with no visible text.
@@ -862,6 +995,7 @@ impl Formatted {
 		// Discord closes a fence at the end of any line (` ```js\ncode``` `); CommonMark needs
 		// the closing fence on its own line. Only inserted newlines differ from the source.
 		let normalized = normalize_fences(&source[..end]);
+		let normalized = strip_unmatched_bold(&normalized);
 		let normalized = escape_bare_quotes(&normalized);
 		let input: &str = &normalized;
 		let mut output = Self {
@@ -1480,6 +1614,11 @@ impl Formatted {
 		card_surface: crate::design::MessageCardSurface,
 	) {
 		let (images, demo, guilds) = media;
+		let channels = source.map_or(&[][..], |source| &source.state.channels);
+		let roles = source.map_or(&[][..], |source| {
+			crate::mentions::known_roles(source.state, source.channel)
+		});
+		let mut missing_channel = None;
 		let mut revealed = u32::MAX;
 		let mut surface = crate::select::Surface::new(ui, "body");
 		self.show_references(
@@ -1488,7 +1627,7 @@ impl Formatted {
 			users,
 			source,
 			profile,
-			(&[], &mut None, guilds, &[]),
+			(channels, &mut missing_channel, guilds, roles),
 			(images, demo, &mut revealed),
 			&mut surface,
 			card_surface,
@@ -1800,8 +1939,16 @@ impl Formatted {
 							render.line,
 							Some(&mut *render.surface),
 						)
-						.on_hover_text(crate::i18n::translate(
-							"markdown-show-run-open-user-profile",
+						.on_hover_text(user.map_or_else(
+							|| format!("User ID: {id}"),
+							|user| {
+								format!(
+									"{} · {id}",
+									render.source.map_or(user.name.as_str(), |s| s
+										.state
+										.user_display_name(user))
+								)
+							},
 						));
 						response.widget_info(|| {
 							egui::WidgetInfo::labeled(
@@ -1810,19 +1957,19 @@ impl Formatted {
 								format!("{label}, user profile"),
 							)
 						});
-						if response.clicked() || response.contains_pointer() {
-							let opened = user.cloned().unwrap_or(model::User {
-								id,
-								name: format!("User {id}"),
-								avatar: None,
-								webhook: false,
-								kind: Default::default(),
-								discriminator: 0,
-								primary_guild: None,
-								cosmetics: None,
-							});
-							render.profile.person_click(ui, &response, None, &opened);
-						}
+						let opened = user.cloned().unwrap_or(model::User {
+							id,
+							name: format!("User {id}"),
+							avatar: None,
+							webhook: false,
+							kind: Default::default(),
+							discriminator: 0,
+							primary_guild: None,
+							cosmetics: None,
+						});
+						// This notes hover intent for bounded profile preloading; it opens a card only
+						// on click, as enforced inside `person_click`.
+						render.profile.person_click(ui, &response, None, &opened);
 						start += 1;
 						continue;
 					}
@@ -1852,7 +1999,16 @@ impl Formatted {
 							egui::Sense::hover(),
 							render.line,
 							Some(&mut *render.surface),
-						);
+						)
+						.on_hover_text(style.role.map_or_else(
+							|| label.clone(),
+							|id| {
+								format!(
+									"{} · {id}",
+									role.map_or("Unknown role", |role| role.name.as_str())
+								)
+							},
+						));
 						response.widget_info(|| {
 							egui::WidgetInfo::labeled(egui::Role::Label, ui.is_enabled(), &label)
 						});
@@ -1958,6 +2114,7 @@ impl Formatted {
 								render.images,
 								render.demo,
 								render.guilds,
+								message_guild(render.source),
 								render.surface,
 								render.query,
 								render.line,
@@ -1982,6 +2139,7 @@ impl Formatted {
 								render.images,
 								render.demo,
 								render.guilds,
+								message_guild(render.source),
 								render.surface,
 								render.query,
 								render.line,
@@ -2009,6 +2167,7 @@ impl Formatted {
 							render.images,
 							render.demo,
 							render.guilds,
+							message_guild(render.source),
 							render.surface,
 							render.query,
 							render.line,
@@ -2034,11 +2193,12 @@ impl Formatted {
 		let width = ui.max_rect().width();
 		let body = egui::TextStyle::Body.resolve(ui.style());
 		let mono = FontId::monospace((body.size * 0.9).round().max(11.0));
-		let label = block
-			.language
-			.map(crate::highlight::Language::name)
-			.filter(|_| !block.tag.is_empty())
-			.map_or_else(|| block.tag.clone(), str::to_owned);
+		let command_block = is_command_block(block);
+		let label = if command_block {
+			String::new()
+		} else {
+			code_block_label(block)
+		};
 		let display = block.display.as_deref().unwrap_or(&block.code);
 		let plain = [(0, display.len() as u32, crate::highlight::Token::Plain)];
 		let segments: &[crate::highlight::Segment] = if block.segments.is_empty() {
@@ -2053,9 +2213,25 @@ impl Formatted {
 			|ui| {
 				ui.set_width(width);
 				ui.add_space(4.0);
+				let command_fill = egui::Color32::from_rgb(0x2b, 0x2d, 0x42);
+				let command_green = egui::Color32::from_rgb(0x57, 0xf2, 0x87);
 				let frame = egui::Frame::new()
-					.fill(card_surface.fill(ui, ui.visuals().code_bg_color))
-					.stroke(Stroke::new(1.0, colors.border))
+					.fill(card_surface.fill(
+						ui,
+						if command_block {
+							command_fill
+						} else {
+							ui.visuals().code_bg_color
+						},
+					))
+					.stroke(Stroke::new(
+						1.0,
+						if command_block {
+							egui::Color32::from_rgb(0x3c, 0x3f, 0x58)
+						} else {
+							colors.border
+						},
+					))
 					.corner_radius(6)
 					.inner_margin(egui::Margin::symmetric(10, 8));
 				let response = frame.show(ui, |ui| {
@@ -2092,7 +2268,11 @@ impl Formatted {
 							0.0,
 							TextFormat {
 								font_id: mono.clone(),
-								color: code_colors.color(*token, colors.text),
+								color: if command_block {
+									command_green
+								} else {
+									code_colors.color(*token, colors.text)
+								},
 								italics: *token == crate::highlight::Token::Comment,
 								..Default::default()
 							},
@@ -2191,6 +2371,7 @@ impl Formatted {
 		images: &mut crate::avatars::Avatars,
 		demo: bool,
 		guilds: &[model::Guild],
+		preferred_guild: Option<Id>,
 		surface: &mut crate::select::Surface,
 		query: &str,
 		line: Option<f32>,
@@ -2497,7 +2678,7 @@ impl Formatted {
 						hit = crate::emoji_details::hover_card(
 							hit,
 							art,
-							&crate::emoji_details::name(&inline.text, guilds),
+							&crate::emoji_details::name(&inline.text, guilds, preferred_guild),
 							true,
 						);
 					}
@@ -2508,7 +2689,14 @@ impl Formatted {
 							format!("Show emoji details: {}", inline.text),
 						)
 					});
-					crate::emoji_details::show(ui, &hit, &inline.text, image, guilds);
+					crate::emoji_details::show(
+						ui,
+						&hit,
+						&inline.text,
+						image,
+						guilds,
+						preferred_guild,
+					);
 					surface.through(&hit);
 				}
 			}
@@ -2524,8 +2712,11 @@ impl Formatted {
 		};
 		// Emoji outside links have their own hover card; links keep only the name.
 		if link && let Some(index) = response.hover_pos().and_then(slot_at) {
-			response = response
-				.on_hover_text_at_pointer(crate::emoji_details::name(&inlines[index].text, guilds));
+			response = response.on_hover_text_at_pointer(crate::emoji_details::name(
+				&inlines[index].text,
+				guilds,
+				preferred_guild,
+			));
 		}
 		let menu = response.id.with("emoji-menu");
 		if response.secondary_clicked() {
@@ -2579,6 +2770,12 @@ impl Formatted {
 		let block = &mut self.blocks[usize::from(index)];
 		let trimmed = block.code.trim_end_matches(['\n', '\r']).len();
 		block.code.truncate(trimmed);
+		if block.language == Some(crate::highlight::Language::Ansi) {
+			let (display, segments) = crate::highlight::ansi_display(&block.code);
+			block.display = Some(display);
+			block.segments = segments;
+			return;
+		}
 		block.display = block
 			.code
 			.contains('\t')
@@ -2880,6 +3077,30 @@ impl Formatted {
 			..Default::default()
 		}
 	}
+}
+
+fn code_block_label(block: &CodeBlock) -> String {
+	if block.tag.eq_ignore_ascii_case("fix") {
+		"fix".to_owned()
+	} else {
+		block
+			.language
+			.map(crate::highlight::Language::name)
+			.filter(|_| !block.tag.is_empty())
+			.map_or_else(|| block.tag.clone(), str::to_owned)
+	}
+}
+
+fn is_command_block(block: &CodeBlock) -> bool {
+	block.language == Some(crate::highlight::Language::Yaml)
+		&& block
+			.code
+			.lines()
+			.filter(|line| !line.trim().is_empty())
+			.all(|line| {
+				let command = line.trim();
+				command.starts_with('/') || command.starts_with('.')
+			}) && block.code.lines().any(|line| !line.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -4528,6 +4749,149 @@ mod tests {
 		let many = "```\nx\n```\n".repeat(MAX_BLOCKS + 4);
 		let parsed = Formatted::parse(&many);
 		assert!(parsed.blocks.len() <= MAX_BLOCKS);
+	}
+	#[test]
+	fn embed_code_fences_can_follow_text_and_keep_discord_language_highlighting() {
+		let prolog = Formatted::parse("Aqui está a dica:**```prolog\n[8] F _ _ _ _ _ N _\n```\n**");
+		assert_eq!(prolog.blocks.len(), 1);
+		assert_eq!(
+			prolog.blocks[0].language,
+			Some(crate::highlight::Language::Prolog)
+		);
+		assert!(prolog.blocks[0].code.contains("[8] F _ _ _ _ _ N _"));
+
+		let yaml = Formatted::parse("Aqui está a resposta:**```yaml\nF 2 0 0 2\n```\n**");
+		assert_eq!(yaml.blocks.len(), 1);
+		assert_eq!(
+			yaml.blocks[0].language,
+			Some(crate::highlight::Language::Yaml)
+		);
+		assert!(
+			yaml.blocks[0]
+				.segments
+				.iter()
+				.any(|(_, _, token)| *token != crate::highlight::Token::Plain)
+		);
+		assert!(yaml.blocks[0].code.contains("F 2 0 0 2"));
+		let text_outside_code: String = yaml
+			.spans
+			.iter()
+			.filter(|(_, style)| style.block.is_none())
+			.map(|(text, _)| text.as_str())
+			.collect();
+		assert!(text_outside_code.contains("Aqui está a resposta:"));
+		assert!(!text_outside_code.contains("**"));
+
+		let fix = Formatted::parse("Here is the fix:**```fix\n-old\n+new\n```");
+		assert_eq!(
+			fix.blocks[0].language,
+			Some(crate::highlight::Language::Diff)
+		);
+		assert!(
+			fix.blocks[0]
+				.segments
+				.iter()
+				.any(|(_, _, token)| *token == crate::highlight::Token::Added)
+		);
+		assert_eq!(code_block_label(&fix.blocks[0]), "fix");
+
+		let ansi = Formatted::parse("Colored:**```ansi\n\x1b[31mred\x1b[0m\n```");
+		assert_eq!(
+			ansi.blocks[0].language,
+			Some(crate::highlight::Language::Ansi)
+		);
+		assert_eq!(ansi.blocks[0].display.as_deref(), Some("red"));
+
+		let small = Formatted::parse("-# quieter embed note");
+		assert!(
+			small
+				.spans
+				.iter()
+				.any(|(text, style)| text.contains("quieter") && style.small)
+		);
+		let dangling = Formatted::parse("**A seguir, todos os itens e comandos para ativação.");
+		let dangling_text: String = dangling
+			.spans
+			.iter()
+			.map(|(text, _)| text.as_str())
+			.collect();
+		assert_eq!(
+			dangling_text,
+			"A seguir, todos os itens e comandos para ativação."
+		);
+		let valid_bold = Formatted::parse("**bold** and `**literal**`");
+		assert!(
+			valid_bold
+				.spans
+				.iter()
+				.any(|(text, style)| { text == "bold" && style.strong && !style.code })
+		);
+		assert!(
+			valid_bold
+				.spans
+				.iter()
+				.any(|(text, style)| text == "**literal**" && style.code)
+		);
+
+		// Exercise actual painted UI text too: parser-only checks missed the visible delimiter leak.
+		let ctx = egui::Context::default();
+		crate::icons::install(&ctx);
+		for (source, expected_label) in [
+			(
+				"💡 Aqui está a resposta:**```yaml\nCHAMARIZ\n```\n**",
+				"YAML",
+			),
+			(
+				"Aqui está a dica:**```prolog\n[7] O _ _ _ _ _ _\n```\n**",
+				"Prolog",
+			),
+			("Patch:**```fix\n-old\n+new\n```", "fix"),
+		] {
+			let parsed = Formatted::parse(source);
+			let output = ctx.run_ui(Default::default(), |ui| parsed.show(ui, &mut None));
+			let mut painted = Vec::new();
+			for shape in &output.shapes {
+				reference_text_shapes(&shape.shape, &mut painted);
+			}
+			let painted_text: String = painted
+				.iter()
+				.map(|shape| shape.galley.text())
+				.collect::<Vec<_>>()
+				.join("\n");
+			assert!(painted_text.contains(expected_label), "{painted_text}");
+			assert!(!painted_text.contains("**"), "{painted_text}");
+			assert!(!painted_text.contains("Diff"), "{painted_text}");
+			output.drop_without_applying_deltas();
+		}
+
+		let command = Formatted::parse("```yaml\n/inventario\n```\n");
+		assert!(is_command_block(&command.blocks[0]));
+		assert_eq!(code_block_label(&command.blocks[0]), "YAML");
+		let output = ctx.run_ui(Default::default(), |ui| command.show(ui, &mut None));
+		let mut painted = Vec::new();
+		for shape in &output.shapes {
+			reference_text_shapes(&shape.shape, &mut painted);
+		}
+		let green = egui::Color32::from_rgb(0x57, 0xf2, 0x87);
+		let command_is_green = painted.iter().any(|shape| {
+			shape.galley.job.text.contains("/inventario")
+				&& shape
+					.galley
+					.job
+					.sections
+					.iter()
+					.any(|section| section.format.color == green)
+		});
+		let command_hides_yaml_header = painted
+			.iter()
+			.all(|shape| !shape.galley.job.text.trim().eq_ignore_ascii_case("yaml"));
+		let command_text_is_present = painted
+			.iter()
+			.any(|shape| shape.galley.text().contains("/inventario"));
+		output.drop_without_applying_deltas();
+		assert!(command_is_green);
+		assert!(command_hides_yaml_header);
+		assert!(command_text_is_present);
 	}
 	#[test]
 	fn dragging_out_of_a_code_block_leaves_the_text_above_it_unselected() {

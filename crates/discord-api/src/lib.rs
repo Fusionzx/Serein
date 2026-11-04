@@ -57,6 +57,8 @@ use tokio::{
 tokio::task_local! {
 	/// Set while a hover preload runs.
 	static SPECULATIVE: ();
+	/// Message writes are dispatched independently like Yapfast.
+	static MESSAGE_SEND: ();
 }
 /// REST permits a preload must leave free for requests the user is waiting for.
 const FOREGROUND_PERMITS: usize = 2;
@@ -395,6 +397,7 @@ impl DiscordApi {
 			return Err(Failure::Protocol);
 		}
 		let speculative = SPECULATIVE.try_with(|()| ()).is_ok();
+		let message_send = MESSAGE_SEND.try_with(|()| ()).is_ok();
 		let route_key = rate_limit::route(&method, path);
 		// Four permits bound concurrent REST work. A slow profile body must not hold the
 		// cooldown mutex and delay a message write; route waits also happen before taking a permit.
@@ -405,7 +408,13 @@ impl DiscordApi {
 			self.rate_limits
 				.acquire(&route_key, speculative)
 				.await
-				.map_err(|()| Failure::Capacity)?;
+				.map_err(|_| {
+					if speculative {
+						Failure::Capacity
+					} else {
+						Failure::RateLimited
+					}
+				})?;
 			loop {
 				let next = *self.cooldown.lock().await;
 				if speculative && Instant::now() < next {
@@ -419,24 +428,28 @@ impl DiscordApi {
 			if self.stopped() {
 				return Err(Failure::Expired);
 			}
-			let _permit = if speculative {
+			let _permit = if message_send {
+				None
+			} else if speculative {
 				// A hover preload takes only spare capacity, so it never delays a click.
 				if self.requests.available_permits() <= FOREGROUND_PERMITS {
 					self.rate_limits.refund(&route_key);
 					return Err(Failure::Capacity);
 				}
 				match self.requests.try_acquire() {
-					Ok(permit) => permit,
+					Ok(permit) => Some(permit),
 					Err(_) => {
 						self.rate_limits.refund(&route_key);
 						return Err(Failure::Capacity);
 					}
 				}
 			} else {
-				self.requests
-					.acquire()
-					.await
-					.map_err(|_| Failure::Network)?
+				Some(
+					self.requests
+						.acquire()
+						.await
+						.map_err(|_| Failure::Network)?,
+				)
 			};
 			let mut authorization = HeaderValue::from_str(self.secret.expose())
 				.map_err(|_| Failure::InvalidCredential)?;
@@ -576,17 +589,11 @@ impl DiscordApi {
 					return Err(Failure::RateLimited);
 				}
 				if status == StatusCode::TOO_MANY_REQUESTS {
-					// The body is the penalty Discord documents. A missing or shorter reset
-					// header must not send the retry early.
-					let delay = safe_delay(error.retry_after.or(retry_header).or(reset))?;
 					let rate_limit_body =
 						serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
-					self.rate_limits.limited(
-						&route_key,
-						&response_headers,
-						&rate_limit_body,
-						delay,
-					);
+					let delay =
+						self.rate_limits
+							.limited(&route_key, &response_headers, &rate_limit_body);
 					if idempotent
 						&& delay <= MAX_READ_RATE_LIMIT_WAIT
 						&& rate_limits < READ_RATE_LIMIT_RETRIES
@@ -798,8 +805,6 @@ impl DiscordApi {
 	/// waits out Discord's route or global limit first. `throttled` hears each wait. Ambiguous outcomes are
 	/// never resent.
 	pub async fn execute_write(&self, command: Command, mut throttled: impl FnMut(&str)) -> Event {
-		/// Resends of one message, each after the wait Discord asked for.
-		const MAX_SEND_RETRIES: usize = 30;
 		let resend = match &command {
 			Command::Send {
 				sticker,
@@ -807,34 +812,55 @@ impl DiscordApi {
 				content,
 				nonce,
 				reply,
-			} => Some((*sticker, *channel, content.clone(), nonce.clone(), *reply)),
+			} => Some(Command::Send {
+				sticker: *sticker,
+				channel: *channel,
+				content: content.clone(),
+				nonce: nonce.clone(),
+				reply: *reply,
+			}),
+			Command::Forward {
+				source,
+				message,
+				guild,
+				channel,
+				nonce,
+			} => Some(Command::Forward {
+				source: *source,
+				message: *message,
+				guild: *guild,
+				channel: *channel,
+				nonce: nonce.clone(),
+			}),
 			_ => None,
 		};
-		let mut event = self.execute(command).await;
-		let Some((sticker, channel, content, nonce, reply)) = resend else {
+		let message_send = matches!(
+			command,
+			Command::Send { .. } | Command::VerifiedSend { .. } | Command::Forward { .. }
+		);
+		let execute = async { self.execute(command).await };
+		let mut event = if message_send {
+			MESSAGE_SEND.scope((), execute).await
+		} else {
+			execute.await
+		};
+		let Some(retry_command) = resend else {
 			return event;
 		};
-		for _ in 0..MAX_SEND_RETRIES {
-			if !matches!(
-				event,
-				Event::SendResult {
-					result: Err(Failure::RateLimited),
-					..
-				}
-			) || self.stopped()
-			{
-				break;
+		if matches!(
+			event,
+			Event::SendResult {
+				result: Err(Failure::RateLimited),
+				..
 			}
-			throttled(&nonce);
-			event = self
-				.execute(Command::Send {
-					sticker,
-					channel,
-					content: content.clone(),
-					nonce: nonce.clone(),
-					reply,
-				})
-				.await;
+		) && !self.stopped()
+		{
+			let nonce = match &event {
+				Event::SendResult { nonce, .. } => nonce,
+				_ => unreachable!(),
+			};
+			throttled(nonce);
+			event = MESSAGE_SEND.scope((), self.execute(retry_command)).await;
 		}
 		event
 	}

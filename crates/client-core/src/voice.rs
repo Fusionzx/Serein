@@ -1399,6 +1399,8 @@ mod tests {
 							hoist: false,
 							managed: false,
 							bits: p::VIEW_CHANNEL,
+							icon: None,
+							unicode_emoji: None,
 						}]),
 						member: Some(p::Member {
 							roles: vec![],
@@ -1647,6 +1649,8 @@ mod tests {
 							managed: false,
 							id: Id(10),
 							bits: p::VIEW_CHANNEL | p::CONNECT,
+							icon: None,
+							unicode_emoji: None,
 						}]),
 						member: Some(p::Member {
 							roles: vec![],
@@ -1762,6 +1766,8 @@ mod tests {
 							position: 0,
 							hoist: false,
 							managed: false,
+							icon: None,
+							unicode_emoji: None,
 						}]),
 						member: Some(p::Member {
 							roles: vec![],

@@ -634,6 +634,8 @@ mod tests {
 						position: 0,
 						hoist: false,
 						managed: false,
+						icon: None,
+						unicode_emoji: None,
 					}]),
 					member: Some(model::permissions::Member {
 						roles: vec![],

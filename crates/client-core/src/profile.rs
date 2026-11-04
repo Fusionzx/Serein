@@ -62,11 +62,14 @@ impl ProfileCache {
 	}
 	/// A cached, unexpired global profile, without refreshing or evicting anything.
 	fn peek(&self, user: Id, now: Instant) -> Option<&UserProfile> {
+		self.peek_scoped(user, None, now)
+	}
+	fn peek_scoped(&self, user: Id, guild: Option<Id>, now: Instant) -> Option<&UserProfile> {
 		self.entries
 			.iter()
 			.find(|entry| {
 				entry.user == user
-					&& entry.guild.is_none()
+					&& entry.guild == guild
 					&& now.saturating_duration_since(entry.fetched) < CACHE_TTL
 			})
 			.map(|entry| &entry.data)
@@ -160,6 +163,15 @@ impl State {
 			.filter(|view| view.user == user && view.guild.is_none())
 			.and_then(|view| view.data.as_ref())
 			.or_else(|| self.profile_cache.peek(user, Instant::now()))
+	}
+	/// An already loaded profile for the current server, falling back to its global profile.
+	pub fn known_profile_in(&self, user: Id, guild: Option<Id>) -> Option<&UserProfile> {
+		self.profile
+			.as_ref()
+			.filter(|view| view.user == user && view.guild == guild)
+			.and_then(|view| view.data.as_ref())
+			.or_else(|| self.profile_cache.peek_scoped(user, guild, Instant::now()))
+			.or_else(|| self.known_profile(user))
 	}
 	/// Saves the account's badge order and hidden set. Demo sessions confirm locally.
 	pub fn save_badge_settings(
@@ -802,6 +814,34 @@ mod tests {
 		// A new connection asks again at once.
 		state.interrupt_preloads();
 		assert!(docked(&mut state, 2, now).is_some());
+	}
+
+	#[test]
+	fn known_profile_for_hover_uses_the_requested_server_scope() {
+		let now = Instant::now();
+		let mut state = State::default();
+		let mut data = own_data("Hover player");
+		data.user.id = Id(42);
+		data.guild = Some(model::GuildProfile {
+			guild: Id(9),
+			roles: vec![],
+			nick: None,
+			avatar: None,
+			banner: None,
+			bio: String::new(),
+			pronouns: String::new(),
+			joined_at: None,
+		});
+		state.profile_cache.insert(Id(42), Some(Id(9)), *data, now);
+		assert_eq!(
+			state
+				.known_profile_in(Id(42), Some(Id(9)))
+				.unwrap()
+				.user
+				.name,
+			"Hover player"
+		);
+		assert!(state.known_profile_in(Id(42), Some(Id(10))).is_none());
 	}
 
 	#[test]
@@ -1659,6 +1699,8 @@ mod tests {
 								position: 1,
 								hoist: false,
 								managed: false,
+								icon: None,
+								unicode_emoji: None,
 							}]),
 							member: None,
 						}],
@@ -1698,6 +1740,8 @@ mod tests {
 						position: 1,
 						hoist: false,
 						managed: false,
+						icon: None,
+						unicode_emoji: None,
 					},
 				}),
 			});

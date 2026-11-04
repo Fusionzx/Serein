@@ -1069,6 +1069,8 @@ mod tests {
 							position: 0,
 							hoist: false,
 							managed: false,
+							icon: None,
+							unicode_emoji: None,
 						},
 						p::Role {
 							id: Id(10),
@@ -1080,6 +1082,8 @@ mod tests {
 							position: 0,
 							hoist: false,
 							managed: false,
+							icon: None,
+							unicode_emoji: None,
 						},
 						p::Role {
 							id: Id(11),
@@ -1091,6 +1095,8 @@ mod tests {
 							position: 0,
 							hoist: false,
 							managed: false,
+							icon: None,
+							unicode_emoji: None,
 						},
 					]),
 					member: Some(p::Member {

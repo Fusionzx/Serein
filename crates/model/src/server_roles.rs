@@ -88,6 +88,8 @@ impl Role {
 			position: self.position,
 			hoist: self.hoist,
 			managed: self.managed,
+			icon: self.icon.clone(),
+			unicode_emoji: self.unicode_emoji.clone(),
 		}
 	}
 }

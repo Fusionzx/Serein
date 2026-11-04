@@ -1394,6 +1394,8 @@ mod tests {
 				hoist: false,
 				managed: false,
 				bits: VIEW_CHANNEL | MANAGE_ROLES,
+				icon: None,
+				unicode_emoji: None,
 			}]);
 			guild.member = Some(model::permissions::Member {
 				roles: vec![],
@@ -1510,6 +1512,8 @@ mod tests {
 			hoist: false,
 			managed: false,
 			bits: VIEW_CHANNEL,
+			icon: None,
+			unicode_emoji: None,
 		}]);
 		guild.member = Some(model::permissions::Member {
 			roles: vec![],
@@ -1953,6 +1957,8 @@ mod tests {
 				position: 0,
 				hoist: false,
 				managed: false,
+				icon: None,
+				unicode_emoji: None,
 			},
 			p::Role {
 				id: Id(10),
@@ -1964,6 +1970,8 @@ mod tests {
 				position: 1,
 				hoist: false,
 				managed: false,
+				icon: None,
+				unicode_emoji: None,
 			},
 		]);
 		guild.member = Some(p::Member {
@@ -2045,6 +2053,8 @@ mod tests {
 				position: 0,
 				hoist: false,
 				managed: false,
+				icon: None,
+				unicode_emoji: None,
 			},
 			p::Role {
 				id: Id(10),
@@ -2056,6 +2066,8 @@ mod tests {
 				position: 1,
 				hoist: false,
 				managed: false,
+				icon: None,
+				unicode_emoji: None,
 			},
 		]);
 		guild.member = Some(p::Member {

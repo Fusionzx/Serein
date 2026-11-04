@@ -43,6 +43,8 @@ fn main() {
 				tertiary_color: None,
 				hoist: true,
 				managed: false,
+				icon: None,
+				unicode_emoji: None,
 			}]),
 		},
 	);

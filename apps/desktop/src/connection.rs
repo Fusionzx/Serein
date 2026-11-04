@@ -15,7 +15,7 @@ use std::{
 use tokio::{
 	runtime::Handle,
 	sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
-	task::JoinHandle,
+	task::{JoinHandle, JoinSet},
 };
 
 pub struct Connection {
@@ -291,6 +291,32 @@ impl Connection {
                         if let Some(error)=error {write_api.stop();let _=write_finished.send(Some(error));write_wake.request_repaint();break;}
                     }
                 }));
+                let (send_send,mut send_receive)=mpsc::channel(COMMAND_SLOTS);
+                let send_api=api.clone();let send_emit=emit.clone();let send_finished=finished.clone();let send_wake=wake.clone();
+                let mut sends=AbortTask(tokio::spawn(async move {
+                    let mut active=JoinSet::new();
+                    loop {
+                        tokio::select! {
+                            command=send_receive.recv()=> {
+                                let Some(command)=command else {break;};
+                                let api=send_api.clone();let emit=send_emit.clone();let finished=send_finished.clone();let wake=send_wake.clone();
+                                active.spawn(async move {
+                                    let event=api.execute_write(command,|nonce|{let _=emit(Event::SendThrottled{nonce:nonce.to_owned()});wake.request_repaint();}).await;
+                                    let terminal=match &event {Event::SendResult{result:Err(failure),..} if failure.ends_session()=>Some(*failure),_=>None};
+                                    if let Some(error)=emit(event).err().or(terminal) {api.stop();let _=finished.send(Some(error));wake.request_repaint();}
+                                });
+                            }
+                            result=active.join_next(), if !active.is_empty()=> {
+                                if result.is_some_and(|result| result.is_err()) {
+                                    send_api.stop();
+                                    let _=send_finished.send(Some(Failure::Network));
+                                    send_wake.request_repaint();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }));
                 let mut history:Option<AbortTask>=None;
                 // Preloads never cancel the open conversation's reads or each other; each kind
                 // keeps at most one in flight, so this list stays tiny.
@@ -317,6 +343,7 @@ impl Connection {
                     tokio::select! {
                         _=&mut gateway_task.0=>{break;}
                         _=&mut writes.0=>{break;}
+                        _=&mut sends.0=>{break;}
                         changed=recipient_scope_changed.changed()=> {
                             if changed.is_err() {break;}
                             recipient_scope_changed.borrow_and_update();
@@ -684,7 +711,12 @@ impl Connection {
                                     history_wake.request_repaint();
                                 })));
                             } else {
-                                write_send.try_send(command).map_err(|_|Failure::Capacity)?;
+                                let message_send=matches!(&command,Command::Send{..}|Command::VerifiedSend{..}|Command::Forward{..});
+                                if message_send {
+                                    send_send.try_send(command).map_err(|_|Failure::Capacity)?;
+                                } else {
+                                    write_send.try_send(command).map_err(|_|Failure::Capacity)?;
+                                }
                             }
                         }
                     }

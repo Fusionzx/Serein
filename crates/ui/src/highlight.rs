@@ -19,6 +19,8 @@ pub enum Token {
 	Punctuation,
 	Added,
 	Removed,
+	/// Foreground ANSI terminal color (0–15) in an `ansi` fenced block.
+	Ansi(u8),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,6 +49,8 @@ pub enum Language {
 	Diff,
 	Dart,
 	Zig,
+	Prolog,
+	Ansi,
 }
 
 /// One highlighted byte range; ranges are contiguous and cover the whole text.
@@ -77,7 +81,9 @@ impl Language {
 			"sql" | "mysql" | "postgres" | "postgresql" | "sqlite" | "psql" => Self::Sql,
 			"html" | "htm" | "xml" | "svg" | "vue" | "xhtml" | "xaml" | "jsx-html" => Self::Html,
 			"css" | "scss" | "less" => Self::Css,
-			"diff" | "patch" => Self::Diff,
+			"diff" | "patch" | "fix" => Self::Diff,
+			"prolog" | "pl" => Self::Prolog,
+			"ansi" => Self::Ansi,
 			"dart" => Self::Dart,
 			"zig" => Self::Zig,
 			_ => return None,
@@ -109,6 +115,8 @@ impl Language {
 			Self::Diff => "Diff",
 			Self::Dart => "Dart",
 			Self::Zig => "Zig",
+			Self::Prolog => "Prolog",
+			Self::Ansi => "ANSI",
 		}
 	}
 }
@@ -120,6 +128,7 @@ pub fn tokenize(language: Language, code: &str) -> Vec<Segment> {
 		Language::Html => html(code, &mut out),
 		Language::Css => css(code, &mut out),
 		Language::Diff => lines(code, &mut out, diff_line),
+		Language::Ansi => return ansi_display(code).1,
 		Language::Yaml => lines(code, &mut out, yaml_line),
 		Language::Toml => lines(code, &mut out, toml_line),
 		Language::Json => generic(&JSON, code, &mut out),
@@ -1354,6 +1363,27 @@ static ZIG: Syntax = Syntax {
 	json_keys: false,
 };
 
+static PROLOG: Syntax = Syntax {
+	line_comment: &["%"],
+	block_comment: Some(("/*", "*/")),
+	quotes: b"\"'",
+	triple: false,
+	keywords: &[
+		"abolish", "assert", "asserta", "assertz", "catch", "clause", "fail", "false", "findall",
+		"forall", "is", "listing", "maplist", "member", "not", "once", "repeat", "retract", "true",
+		"write", "writeln",
+	],
+	types: &[],
+	constants: &["true", "false", "[]"],
+	at_attribute: false,
+	rust: false,
+	preprocessor: false,
+	dollar: false,
+	case_insensitive: false,
+	capital_types: false,
+	json_keys: false,
+};
+
 fn syntax(language: Language) -> &'static Syntax {
 	match language {
 		Language::Rust => &RUST,
@@ -1372,8 +1402,68 @@ fn syntax(language: Language) -> &'static Syntax {
 		Language::Json => &JSON,
 		Language::Dart => &DART,
 		Language::Zig => &ZIG,
-		Language::Html | Language::Css | Language::Diff | Language::Yaml | Language::Toml => &JSON,
+		Language::Prolog => &PROLOG,
+		Language::Html
+		| Language::Css
+		| Language::Diff
+		| Language::Yaml
+		| Language::Toml
+		| Language::Ansi => &JSON,
 	}
+}
+
+/// Remove ANSI SGR controls from the displayed code while preserving their foreground colors.
+pub(crate) fn ansi_display(code: &str) -> (String, Vec<Segment>) {
+	let bytes = code.as_bytes();
+	let mut display = String::with_capacity(code.len());
+	let mut out = Segments::default();
+	let mut color = None;
+	let mut source = 0;
+	let mut visible_start = 0;
+	let mut i = 0;
+	while i < bytes.len() {
+		if bytes[i..].starts_with(b"\x1b[") {
+			let Some(relative_end) = bytes[i + 2..].iter().position(|byte| *byte == b'm') else {
+				i += 1;
+				continue;
+			};
+			let end = i + 2 + relative_end;
+			let params = &code[i + 2..end];
+			let mut next_color = color;
+			for param in params
+				.split(';')
+				.filter_map(|value| value.parse::<u8>().ok())
+			{
+				match param {
+					0 | 39 => next_color = None,
+					30..=37 => next_color = Some(param - 30),
+					90..=97 => next_color = Some(param - 90 + 8),
+					_ => {}
+				}
+			}
+			let visible = &code[source..i];
+			display.push_str(visible);
+			out.push(
+				visible_start,
+				display.len(),
+				color.map_or(Token::Plain, Token::Ansi),
+			);
+			color = next_color;
+			i = end + 1;
+			source = i;
+			visible_start = display.len();
+			continue;
+		}
+		i += char_len(bytes, i);
+	}
+	display.push_str(&code[source..]);
+	out.push(
+		visible_start,
+		display.len(),
+		color.map_or(Token::Plain, Token::Ansi),
+	);
+	let segments = out.finish(display.len());
+	(display, segments)
 }
 
 fn is_ident_start(byte: u8) -> bool {
@@ -1737,6 +1827,10 @@ fn config_value(value: &str, start: usize, out: &mut Segments) {
 fn yaml_line(line: &str, start: usize, out: &mut Segments) {
 	let trimmed = line.trim_start();
 	let mut offset = line.len() - trimmed.len();
+	if trimmed.starts_with('/') {
+		out.push(start + offset, start + line.len(), Token::Added);
+		return;
+	}
 	if trimmed.starts_with('#') {
 		out.push(start + offset, start + line.len(), Token::Comment);
 		return;
@@ -2090,6 +2184,16 @@ mod tests {
 		assert!(toks.contains(&("\"open", Token::String)));
 		assert!(toks.contains(&("next", Token::Function)));
 		assert!(toks.contains(&("const", Token::Keyword)));
+	}
+
+	#[test]
+	fn ansi_blocks_strip_sgr_controls_and_color_visible_text() {
+		let (display, segments) = ansi_display("plain \x1b[31mred\x1b[0m normal");
+		assert_eq!(display, "plain red normal");
+		assert!(segments.contains(&(6, 9, Token::Ansi(1))));
+		assert!(Language::from_tag("ansi") == Some(Language::Ansi));
+		assert_eq!(Language::from_tag("fix"), Some(Language::Diff));
+		assert_eq!(Language::from_tag("prolog"), Some(Language::Prolog));
 	}
 
 	#[test]

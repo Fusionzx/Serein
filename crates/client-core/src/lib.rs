@@ -5122,6 +5122,8 @@ mod tests {
 								hoist: false,
 								managed: false,
 								bits: p::VIEW_CHANNEL | p::READ_MESSAGE_HISTORY,
+								icon: None,
+								unicode_emoji: None,
 							}]),
 						})
 						.collect(),

@@ -399,6 +399,8 @@ fn snapshot() -> p::Snapshot {
 					managed: false,
 					id: Id(10),
 					bits: BITS,
+					icon: None,
+					unicode_emoji: None,
 				},
 				p::Role {
 					name: String::new(),
@@ -410,6 +412,8 @@ fn snapshot() -> p::Snapshot {
 					managed: false,
 					id: Id(11),
 					bits: 0,
+					icon: None,
+					unicode_emoji: None,
 				},
 			]),
 			member: Some(p::Member {
@@ -770,6 +774,8 @@ fn role_rest_catalog_and_self_membership_revoke_selected_history_immediately() {
 			position: 3,
 			hoist: false,
 			managed: false,
+			icon: None,
+			unicode_emoji: None,
 		});
 		metadata.member.as_mut().unwrap().roles = vec![Id(11), Id(13)];
 		permission(&mut state, PermissionEvent::Guild(metadata.clone()));
@@ -1140,6 +1146,8 @@ fn revoked_view_cannot_return_through_stale_gateway_content_or_old_history() {
 					managed: false,
 					id: Id(11),
 					bits: p::ATTACH_FILES,
+					icon: None,
+					unicode_emoji: None,
 				},
 			},
 		);
@@ -1241,6 +1249,8 @@ fn deleting_an_unassigned_role_prunes_its_overwrites_and_invalidates_cached_deci
 					managed: false,
 					id: Id(10),
 					bits: BITS & !p::SEND_MESSAGES,
+					icon: None,
+					unicode_emoji: None,
 				},
 			},
 		);
@@ -1320,6 +1330,8 @@ fn malformed_snapshots_are_atomic_and_rejected_permission_events_fail_closed() {
 				managed: false,
 				id: Id(id),
 				bits: BITS,
+				icon: None,
+				unicode_emoji: None,
 			})
 			.collect(),
 	);
@@ -1511,6 +1523,8 @@ fn member_requests_survive_guild_hydration_and_follow_current_permissions() {
 			tertiary_color: None,
 			hoist,
 			managed: false,
+			icon: None,
+			unicode_emoji: None,
 		};
 		for role in [
 			role(11, 2, 0x112233, true),

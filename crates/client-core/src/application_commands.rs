@@ -380,6 +380,8 @@ mod tests {
 				position: 0,
 				hoist: false,
 				managed: false,
+				icon: None,
+				unicode_emoji: None,
 			};
 			state
 				.permissions
@@ -685,6 +687,8 @@ mod tests {
 						position: 0,
 						hoist: false,
 						managed: false,
+						icon: None,
+						unicode_emoji: None,
 					}]),
 					member: Some(p::Member {
 						roles: vec![],

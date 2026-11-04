@@ -57,6 +57,8 @@ pub struct Role {
 	pub hoist: bool,
 	/// Integration-owned roles (bots, boosts, subscriptions) cannot be assigned by hand.
 	pub managed: bool,
+	pub icon: Option<String>,
+	pub unicode_emoji: Option<String>,
 }
 impl Role {
 	pub fn colors(&self) -> crate::server_roles::Colors {
@@ -74,7 +76,10 @@ impl Role {
 			.then_with(|| other.id.cmp(&self.id))
 	}
 	pub fn bytes(&self) -> usize {
-		size_of::<Self>() + self.name.capacity()
+		size_of::<Self>()
+			+ self.name.capacity()
+			+ self.icon.as_ref().map_or(0, String::capacity)
+			+ self.unicode_emoji.as_ref().map_or(0, String::capacity)
 	}
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -357,6 +362,8 @@ mod tests {
 					position: 0,
 					hoist: false,
 					managed: false,
+					icon: None,
+					unicode_emoji: None,
 					id: Id(1),
 					bits: VIEW_CHANNEL
 						| READ_MESSAGE_HISTORY
@@ -371,6 +378,8 @@ mod tests {
 					position: 0,
 					hoist: false,
 					managed: false,
+					icon: None,
+					unicode_emoji: None,
 					id: Id(2),
 					bits: CONNECT,
 				},
@@ -382,6 +391,8 @@ mod tests {
 					position: 0,
 					hoist: false,
 					managed: false,
+					icon: None,
+					unicode_emoji: None,
 					id: Id(3),
 					bits: SPEAK | SEND_MESSAGES_IN_THREADS,
 				},
@@ -505,6 +516,8 @@ mod tests {
 						position: 0,
 						hoist: false,
 						managed: false,
+						icon: None,
+						unicode_emoji: None,
 						id: Id(1),
 						bits: 0
 					};
@@ -521,6 +534,8 @@ mod tests {
 					position: 0,
 					hoist: false,
 					managed: false,
+					icon: None,
+					unicode_emoji: None,
 					id: Id(2),
 					bits: 0,
 				}]),
@@ -558,6 +573,8 @@ mod tests {
 							position: 0,
 							hoist: false,
 							managed: false,
+							icon: None,
+							unicode_emoji: None,
 							id: Id(id as u64),
 							bits: 0,
 						})

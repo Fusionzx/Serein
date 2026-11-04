@@ -1013,6 +1013,8 @@ pub fn seed_access_marks(state: &mut State) {
 				position: 1,
 				hoist: false,
 				managed: false,
+				icon: None,
+				unicode_emoji: None,
 			});
 		}
 		if let Some(member) = guild.member.as_mut() {
@@ -1119,6 +1121,8 @@ pub fn chat_demo_state() -> State {
 				position: 1,
 				hoist: false,
 				managed: false,
+				icon: None,
+				unicode_emoji: None,
 			},
 		}),
 	});
@@ -1270,6 +1274,8 @@ pub fn permission_snapshot(state: &State) -> model::permissions::Snapshot {
 					managed: false,
 					id: guild.id,
 					bits,
+					icon: None,
+					unicode_emoji: None,
 				}]),
 				member: Some(p::Member {
 					roles: vec![],

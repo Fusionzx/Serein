@@ -13,6 +13,7 @@ use std::{
 
 const MAX_TRACKED_ROUTES: usize = 4096;
 const MAX_RESET: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub(crate) struct Limits {
@@ -32,15 +33,15 @@ struct Bucket {
 }
 
 impl Limits {
-	/// Wait until a known route bucket admits a request. Speculative reads never wait.
-	pub(crate) async fn acquire(&self, route: &str, speculative: bool) -> Result<(), ()> {
+	/// Wait as Yapfast does for the route bucket Discord last reported.
+	pub(crate) async fn acquire(&self, route: &str, speculative: bool) -> Result<(), Duration> {
 		loop {
 			let wait = self.reserve(route, Instant::now());
 			if wait.is_zero() {
 				return Ok(());
 			}
-			if speculative {
-				return Err(());
+			if speculative || wait > MAX_WAIT {
+				return Err(wait);
 			}
 			tokio::time::sleep(wait).await;
 		}
@@ -81,8 +82,20 @@ impl Limits {
 		);
 	}
 
-	/// Record a 429. A route limit blocks its bucket; only an explicitly global response blocks all.
-	pub(crate) fn limited(&self, route: &str, headers: &HeaderMap, body: &Value, delay: Duration) {
+	/// Learn a 429 wait from the response, using Yapfast's body/header precedence and fallback.
+	pub(crate) fn limited(&self, route: &str, headers: &HeaderMap, body: &Value) -> Duration {
+		let retry_after = body
+			.get("retry_after")
+			.and_then(Value::as_f64)
+			.and_then(bounded_seconds);
+		let retry_header = header_duration(headers, "retry-after");
+		let reset = header_duration(headers, "x-ratelimit-reset-after");
+		let delay = retry_after
+			.into_iter()
+			.chain(retry_header)
+			.chain(reset)
+			.max()
+			.unwrap_or(Duration::from_secs(1));
 		let global = body.get("global").and_then(Value::as_bool) == Some(true)
 			|| headers
 				.get("x-ratelimit-global")
@@ -99,6 +112,7 @@ impl Limits {
 		let until = Instant::now() + delay.min(MAX_RESET);
 		if global {
 			state.global_until = Some(state.global_until.map_or(until, |old| old.max(until)));
+			return delay;
 		}
 		let key = Self::key(&mut state, route, bucket);
 		state.buckets.insert(
@@ -108,6 +122,7 @@ impl Limits {
 				reset: until,
 			},
 		);
+		delay
 	}
 
 	fn reserve(&self, route: &str, now: Instant) -> Duration {
@@ -169,6 +184,10 @@ fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
 
 fn header_duration(headers: &HeaderMap, name: &str) -> Option<Duration> {
 	let seconds: f64 = headers.get(name)?.to_str().ok()?.parse().ok()?;
+	bounded_seconds(seconds)
+}
+
+fn bounded_seconds(seconds: f64) -> Option<Duration> {
 	(seconds.is_finite() && seconds >= 0.0)
 		.then(|| Duration::from_secs_f64(seconds.min(MAX_RESET.as_secs_f64())))
 }
@@ -265,16 +284,14 @@ mod tests {
 		limits.limited(
 			first,
 			&HeaderMap::new(),
-			&json!({"global": false}),
-			Duration::from_secs(2),
+			&json!({"global": false, "retry_after": 2.0}),
 		);
 		assert!(limits.reserve(first, Instant::now()) > Duration::from_secs(1));
 		assert_eq!(limits.reserve(second, Instant::now()), Duration::ZERO);
 		limits.limited(
 			first,
 			&HeaderMap::new(),
-			&json!({"global": true}),
-			Duration::from_secs(2),
+			&json!({"global": true, "retry_after": 2.0}),
 		);
 		assert!(limits.reserve(second, Instant::now()) > Duration::from_secs(1));
 	}

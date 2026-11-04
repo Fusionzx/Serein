@@ -914,6 +914,8 @@ mod tests {
 						managed: false,
 						id: Id(10),
 						bits: p::VIEW_CHANNEL | p::READ_MESSAGE_HISTORY,
+						icon: None,
+						unicode_emoji: None,
 					}]),
 					member: Some(p::Member {
 						roles: vec![],

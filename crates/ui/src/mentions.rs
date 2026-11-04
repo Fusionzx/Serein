@@ -266,6 +266,12 @@ pub fn find_user<'a>(
 	{
 		return Some(&member.user);
 	}
+	let guild = state
+		.channel(source.channel)
+		.and_then(|channel| channel.guild);
+	if let Some(profile) = state.known_profile_in(id, guild) {
+		return Some(&profile.user);
+	}
 	state.timeline.iter().find_map(|message| {
 		if message.channel != source.channel {
 			return None;
@@ -1567,6 +1573,8 @@ mod tests {
 								hoist: false,
 								managed: false,
 								bits: p::VIEW_CHANNEL | p::SEND_MESSAGES | p::MENTION_EVERYONE,
+								icon: None,
+								unicode_emoji: None,
 							}]),
 							member: Some(p::Member {
 								roles: vec![],
@@ -2169,6 +2177,8 @@ pub fn debug_role_mentions_check(state: &mut State) {
 		position: 1,
 		hoist: false,
 		managed: false,
+		icon: None,
+		unicode_emoji: None,
 	});
 	let mut message = state.timeline.iter().next().unwrap().clone();
 	message.channel = channel;

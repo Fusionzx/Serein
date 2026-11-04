@@ -1065,6 +1065,8 @@ mod invite_tests {
 					position: 0,
 					hoist: false,
 					managed: false,
+					icon: None,
+					unicode_emoji: None,
 				}]),
 			},
 		);
@@ -1241,6 +1243,8 @@ mod sticker_tests {
 					position: 0,
 					hoist: false,
 					managed: false,
+					icon: None,
+					unicode_emoji: None,
 				}]),
 			},
 		);

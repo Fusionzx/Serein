@@ -3168,9 +3168,11 @@ impl TimelineView {
 										|ui| {
 											let time = ui
 												.label(
-													RichText::new(crate::local_time::clock(time))
-														.size(12.0)
-														.color(colors.muted),
+													RichText::new(
+														crate::local_time::clock_seconds(time),
+													)
+													.size(12.0)
+													.color(colors.muted),
 												)
 												.on_hover_text_with(|| {
 													crate::local_time::full(time)
@@ -7030,6 +7032,8 @@ mod tests {
 							hoist: false,
 							managed: false,
 							bits: p::VIEW_CHANNEL | p::READ_MESSAGE_HISTORY,
+							icon: None,
+							unicode_emoji: None,
 						}]),
 					})
 					.collect(),

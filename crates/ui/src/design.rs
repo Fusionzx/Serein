@@ -3009,6 +3009,7 @@ pub struct CodeColors {
 	pub punctuation: Color32,
 	pub added: Color32,
 	pub removed: Color32,
+	pub ansi: [Color32; 16],
 }
 impl CodeColors {
 	pub fn color(&self, token: crate::highlight::Token, plain: Color32) -> Color32 {
@@ -3027,6 +3028,7 @@ impl CodeColors {
 			Token::Punctuation => self.punctuation,
 			Token::Added => self.added,
 			Token::Removed => self.removed,
+			Token::Ansi(index) => self.ansi[usize::from(index.min(15))],
 		}
 	}
 }
@@ -3046,6 +3048,24 @@ pub fn code_colors(ui: &egui::Ui) -> CodeColors {
 			punctuation: mix(p.text, p.muted, 0.5),
 			added: p.positive,
 			removed: p.danger,
+			ansi: [
+				rgb(0x45475a),
+				rgb(0xf38ba8),
+				rgb(0xa6e3a1),
+				rgb(0xf9e2af),
+				rgb(0x89b4fa),
+				rgb(0xf5c2e7),
+				rgb(0x94e2d5),
+				rgb(0xcdd6f4),
+				rgb(0x585b70),
+				rgb(0xf38ba8),
+				rgb(0xa6e3a1),
+				rgb(0xf9e2af),
+				rgb(0x89b4fa),
+				rgb(0xf5c2e7),
+				rgb(0x94e2d5),
+				rgb(0xffffff),
+			],
 		}
 	} else {
 		CodeColors {
@@ -3061,6 +3081,24 @@ pub fn code_colors(ui: &egui::Ui) -> CodeColors {
 			punctuation: mix(p.text, p.muted, 0.5),
 			added: p.positive,
 			removed: p.danger,
+			ansi: [
+				rgb(0x1f2937),
+				rgb(0xdc2626),
+				rgb(0x15803d),
+				rgb(0xa16207),
+				rgb(0x2563eb),
+				rgb(0xc026d3),
+				rgb(0x0891b2),
+				rgb(0xf3f4f6),
+				rgb(0x4b5563),
+				rgb(0xef4444),
+				rgb(0x22c55e),
+				rgb(0xeab308),
+				rgb(0x3b82f6),
+				rgb(0xd946ef),
+				rgb(0x06b6d4),
+				rgb(0xffffff),
+			],
 		}
 	}
 }

@@ -240,6 +240,8 @@ fn main() {
 				hoist: false,
 				managed: false,
 				bits: 0,
+				icon: None,
+				unicode_emoji: None,
 			},
 		}),
 	});

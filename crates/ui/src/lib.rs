@@ -1626,22 +1626,20 @@ impl MessagingUi {
 					};
 					match slot {
 						Some(model::MemberSlot::Group(id)) => {
+							let role = id.parse::<u64>().ok().and_then(|role_id| {
+								guild.and_then(|guild| {
+									state.guild_roles(guild).and_then(|roles| {
+										roles.iter().find(|role| role.id == Id(role_id))
+									})
+								})
+							});
 							let name = match id.as_str() {
 								"online" => language.text("status-online"),
 								"offline" => language.text("status-offline"),
-								_ => {
-									let role = id.parse::<u64>().ok().and_then(|role_id| {
-										guild.and_then(|guild| {
-											state.guild_roles(guild).and_then(|roles| {
-												roles.iter().find(|role| role.id == Id(role_id))
-											})
-										})
-									});
-									match role {
-										Some(role) if !role.name.is_empty() => role.name.clone(),
-										_ => language.text("role"),
-									}
-								}
+								_ => match role {
+									Some(role) if !role.name.is_empty() => role.name.clone(),
+									_ => language.text("role"),
+								},
 							};
 							let text = list
 								.groups
@@ -1663,6 +1661,25 @@ impl MessagingUi {
 									))
 									.layout(egui::Layout::left_to_right(egui::Align::Center)),
 							);
+							if let Some(role) = role {
+								if let Some(icon) = &role.icon {
+									self.avatars.show_icon(
+										&mut header,
+										Some(format!("role-icon-{}-{icon}", role.id)),
+										14.0,
+										state.demo,
+										"Role icon",
+									);
+								} else if let Some(emoji) = &role.unicode_emoji {
+									if let Some(image) =
+										crate::emoji::image(header.ctx(), emoji, 14.0)
+									{
+										header.add(image);
+									} else {
+										header.label(emoji);
+									}
+								}
+							}
 							header
 								.add(
 									egui::Label::new(crate::role_names::galley(
@@ -3668,10 +3685,16 @@ impl MessagingUi {
 					&model::KeyChord::new("Z", model::keybinds::PRIMARY),
 				)
 			});
-		if restore_sent
-			&& let Some((_, _, content)) = self.undo_sent.take()
+	if restore_sent
+		&& let Some((_, _, content)) = self.undo_sent.as_ref()
 		{
-			*draft = content;
+		*draft = content.clone();
+			let mut edit_state =
+				egui::text_edit::TextEditState::load(ctx, composer_id).unwrap_or_default();
+			edit_state.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+				egui::text::CCursor::new(draft.chars().count()),
+			)));
+			edit_state.store(ctx, composer_id);
 			ctx.memory_mut(|memory| memory.request_focus(composer_id));
 		}
 						let mut mention_changed = false;
@@ -3878,10 +3901,6 @@ impl MessagingUi {
                         }
                         let edit = output.response;
                         let cleared = draft.is_empty();
-		if (edit.changed() && !cleared) || mention_changed {
-			// Start a normal edit history as soon as the user changes the restored-or-new draft.
-			self.undo_sent = None;
-		}
                         if edit.changed() || mention_changed {
                             if editing_here && let Some((_, _, modified)) = &mut self.edit_modified {
                                 *modified = true;
@@ -4890,46 +4909,6 @@ impl MessagingUi {
 					&& (state.selected.is_none() || selected_voice || selected_forum)
 				{
 					ui.painter().rect_filled(ui.max_rect(), 0, message_surface);
-				}
-				let warnings = state.startup_warnings;
-				if !warnings.presence {
-					self.friends.presence_warning_dismissed = None;
-				}
-				let unavailable: Vec<_> = [
-					(warnings.read_state, "read status"),
-					(warnings.notifications, "notification settings"),
-					(warnings.sessions, "session status"),
-					(warnings.emojis, "some server emoji"),
-					(warnings.stickers, "some server stickers"),
-					(
-						warnings.guild_entries,
-						"some server channels, roles or members",
-					),
-					(warnings.private_channels, "some direct messages"),
-					(warnings.contacts, "some contacts"),
-					(
-						warnings.entries
-							&& !warnings.guild_entries
-							&& !warnings.private_channels
-							&& !warnings.contacts,
-						"some account entries",
-					),
-				]
-				.into_iter()
-				.filter_map(|(unavailable, label)| unavailable.then_some(label))
-				.collect();
-				if !unavailable.is_empty() {
-					egui::Frame::new()
-						.inner_margin(egui::Margin::symmetric(16, 6))
-						.show(ui, |ui| {
-							ui.colored_label(
-								colors.warning,
-								format!(
-									"Connected with some data unavailable: {}. Reconnect to retry.",
-									unavailable.join(", ")
-								),
-							);
-						});
 				}
 				if state.selected.is_none() && self.guild.is_none() {
 					self.call_bar(ui, state, &mut commands, None);
@@ -6189,7 +6168,7 @@ mod composer_tests {
 	}
 
 	#[test]
-	fn ctrl_z_restores_last_sent_text_once_only_in_empty_composer() {
+	fn ctrl_z_restores_last_sent_text_again_after_the_draft_is_cleared() {
 		let mut state = edit_state();
 		let channel = state.selected.unwrap();
 		let mut view = MessagingUi::default();
@@ -6224,7 +6203,13 @@ mod composer_tests {
 			state.drafts.get(&channel).map(String::as_str),
 			Some("testando")
 		);
-		assert!(view.undo_sent.is_none(), "sent-text recovery is one-shot");
+		assert!(
+			view.undo_sent.is_some(),
+			"keep sent text available for another undo"
+		);
+		// Ctrl+Backspace removes the restored word; a later Ctrl+Z must still be able
+		// to recover the same last-sent message.
+		state.drafts.insert(channel, String::new());
 
 		let ctrl_z_again = egui::Event::Key {
 			key: egui::Key::Z,
@@ -8428,6 +8413,8 @@ mod composer_tests {
 					position: 1,
 					hoist: true,
 					managed: false,
+					icon: None,
+					unicode_emoji: None,
 				}]),
 			},
 		);

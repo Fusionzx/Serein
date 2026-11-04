@@ -79,28 +79,98 @@ pub(crate) fn bits<'de, D: Deserializer<'de>>(d: D) -> Result<u128, D::Error> {
 #[derive(Deserialize)]
 pub(crate) struct Role {
 	id: Id,
-	permissions: Bits,
-	#[serde(default, deserialize_with = "null_default")]
+	#[serde(default = "zero_bits", deserialize_with = "lenient_bits")]
+	permissions: RoleBits,
+	#[serde(default, deserialize_with = "lenient_name")]
 	name: String,
-	#[serde(default, deserialize_with = "null_default")]
+	#[serde(default, deserialize_with = "lenient_u32")]
 	color: u32,
-	#[serde(default)]
+	#[serde(default, deserialize_with = "lenient_role_colors")]
 	colors: Option<RoleColors>,
-	#[serde(default, deserialize_with = "null_default")]
+	#[serde(default, deserialize_with = "lenient_i32")]
 	position: i32,
-	#[serde(default, deserialize_with = "null_default")]
+	#[serde(default, deserialize_with = "lenient_bool")]
 	hoist: bool,
-	#[serde(default, deserialize_with = "null_default")]
+	#[serde(default, deserialize_with = "lenient_bool")]
 	managed: bool,
+	#[serde(default, deserialize_with = "lenient_string")]
+	icon: Option<String>,
+	#[serde(default, deserialize_with = "lenient_string")]
+	unicode_emoji: Option<String>,
 }
-#[derive(Deserialize)]
 struct RoleColors {
-	#[serde(default)]
 	primary_color: Option<u32>,
-	#[serde(default)]
 	secondary_color: Option<u32>,
-	#[serde(default)]
 	tertiary_color: Option<u32>,
+}
+#[derive(Default)]
+struct RoleBits {
+	value: u128,
+	valid: bool,
+}
+fn zero_bits() -> RoleBits {
+	RoleBits::default()
+}
+fn lenient_bits<'de, D: Deserializer<'de>>(d: D) -> Result<RoleBits, D::Error> {
+	let value = serde_json::Value::deserialize(d)?;
+	let bits = match value {
+		serde_json::Value::String(value)
+			if !value.is_empty()
+				&& value.len() <= 39
+				&& value.bytes().all(|byte| byte.is_ascii_digit()) =>
+		{
+			value.parse::<u128>().ok()
+		}
+		serde_json::Value::Number(value) => value.as_u64().map(u128::from),
+		_ => None,
+	};
+	Ok(RoleBits {
+		value: bits.unwrap_or_default(),
+		valid: bits.is_some(),
+	})
+}
+fn lenient_name<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+	let value = serde_json::Value::deserialize(d)?;
+	Ok(value.as_str().unwrap_or_default().to_owned())
+}
+fn lenient_u32<'de, D: Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+	let value = serde_json::Value::deserialize(d)?;
+	Ok(value
+		.as_u64()
+		.and_then(|value| u32::try_from(value).ok())
+		.unwrap_or_default())
+}
+fn lenient_i32<'de, D: Deserializer<'de>>(d: D) -> Result<i32, D::Error> {
+	let value = serde_json::Value::deserialize(d)?;
+	Ok(value
+		.as_i64()
+		.and_then(|value| i32::try_from(value).ok())
+		.unwrap_or_default())
+}
+fn lenient_bool<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+	let value = serde_json::Value::deserialize(d)?;
+	Ok(value.as_bool().unwrap_or_default())
+}
+fn lenient_string<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+	let value = serde_json::Value::deserialize(d)?;
+	Ok(value.as_str().map(str::to_owned))
+}
+fn lenient_role_colors<'de, D: Deserializer<'de>>(d: D) -> Result<Option<RoleColors>, D::Error> {
+	let value = serde_json::Value::deserialize(d)?;
+	let serde_json::Value::Object(values) = value else {
+		return Ok(None);
+	};
+	let color = |name: &str| {
+		values
+			.get(name)
+			.and_then(serde_json::Value::as_u64)
+			.and_then(|value| u32::try_from(value).ok())
+	};
+	Ok(Some(RoleColors {
+		primary_color: color("primary_color"),
+		secondary_color: color("secondary_color"),
+		tertiary_color: color("tertiary_color"),
+	}))
 }
 impl Role {
 	pub(crate) fn checked(self) -> Result<p::Role, DecodeError> {
@@ -117,12 +187,15 @@ impl Role {
 				tertiary: colors.tertiary_color,
 			},
 		);
-		if !colors.valid() {
-			return Err(DecodeError);
-		}
+		let colors = if colors.valid() {
+			colors
+		} else {
+			// A bad color must not erase the role's usable ID, name and permissions.
+			model::server_roles::Colors::default()
+		};
 		Ok(p::Role {
 			id: self.id,
-			bits: self.permissions.0,
+			bits: self.permissions.value,
 			name: self
 				.name
 				.chars()
@@ -135,6 +208,10 @@ impl Role {
 			position: self.position,
 			hoist: self.hoist,
 			managed: self.managed,
+			icon: self.icon.filter(|icon| model::valid_avatar_hash(icon)),
+			unicode_emoji: self
+				.unicode_emoji
+				.filter(|emoji| emoji.len() <= 128 && !emoji.chars().any(char::is_control)),
 		})
 	}
 }
@@ -242,7 +319,7 @@ struct Guild {
 	#[serde(default)]
 	properties: Option<Properties>,
 	#[serde(default)]
-	roles: Option<Lossy<Role, 512, true>>,
+	roles: Option<Slots<Role, 512, true>>,
 	#[serde(default)]
 	members: Lossy<Member, MAX_MEMBERS, true>,
 	#[serde(default)]
@@ -352,10 +429,15 @@ fn checked_snapshot(
 			Ok(Patch::Value(id)) => Some(id),
 			_ => None,
 		};
-		let roles = guild.roles.filter(|rows| !rows.skipped).and_then(|rows| {
+		let roles = guild.roles.and_then(|rows| {
+			// Truncation leaves hierarchy/permission data incomplete, so it remains unknown.
+			if rows.truncated {
+				return None;
+			}
 			let mut seen = BTreeSet::new();
 			rows.items
 				.into_iter()
+				.flatten()
 				.map(|r| {
 					let role = r.checked()?;
 					if !seen.insert(role.id) {
@@ -501,6 +583,9 @@ pub fn role(bytes: &[u8]) -> Result<(Id, p::Role), DecodeError> {
 	}
 	let update: Update = decode(bytes)?;
 	nonzero(update.guild_id)?;
+	if !update.role.permissions.valid {
+		return Err(DecodeError);
+	}
 	Ok((update.guild_id, update.role.checked()?))
 }
 pub fn role_removed(bytes: &[u8]) -> Result<(Id, Id), DecodeError> {
@@ -642,6 +727,21 @@ mod tests {
 	use serde_json::json;
 
 	#[test]
+	fn ready_keeps_role_artwork_for_member_group_headers() {
+		let payload = json!({"guilds":[{"id":"1","roles":[
+			{"id":"1","permissions":"0"},
+			{"id":"2","permissions":"0","icon":"0123456789abcdef0123456789abcdef","unicode_emoji":"🛡️"}
+		]}]});
+		let snapshot = ready(&serde_json::to_vec(&payload).unwrap(), Id(9)).unwrap();
+		let role = &snapshot.guilds[0].roles.as_ref().unwrap()[1];
+		assert_eq!(
+			role.icon.as_deref(),
+			Some("0123456789abcdef0123456789abcdef")
+		);
+		assert_eq!(role.unicode_emoji.as_deref(), Some("🛡️"));
+	}
+
+	#[test]
 	fn role_gradients_preserve_all_stops_and_reject_invalid_rgb() {
 		let colors =
 			json!({"primary_color":1122867,"secondary_color":4478310,"tertiary_color":7833753});
@@ -668,7 +768,9 @@ mod tests {
 		for stop in ["primary_color", "secondary_color", "tertiary_color"] {
 			let mut invalid = payload.clone();
 			invalid["role"]["colors"][stop] = json!(0x1000000);
-			assert!(super::role(&serde_json::to_vec(&invalid).unwrap()).is_err());
+			let (_, role) = super::role(&serde_json::to_vec(&invalid).unwrap()).unwrap();
+			assert_eq!(role.name, "");
+			assert_eq!(role.colors(), model::server_roles::Colors::default());
 		}
 		let (_, solid) = super::role(br#"{"guild_id":"1","role":{"id":"2","permissions":"0","color":1122867,"colors":{"primary_color":null,"secondary_color":null,"tertiary_color":null}}}"#).unwrap();
 		assert_eq!(
@@ -700,12 +802,12 @@ mod tests {
 			assert!(updated.bytes() >= size_of::<p::Role>() + 200);
 			let (_, uncolored) = super::role(br#"{"guild_id":"1","role":{"id":"2","permissions":"0","color":1122867,"colors":{"primary_color":0}}}"#).unwrap();
 			assert_eq!(uncolored.color, 0);
-			assert!(
-				super::role(
-					br#"{"guild_id":"1","role":{"id":"2","permissions":"0","color":16777216}}"#
-				)
-				.is_err()
-			);
+			let (_, uncolored) = super::role(
+				br#"{"guild_id":"1","role":{"id":"2","permissions":"0","name":"Keep me","color":16777216}}"#,
+			)
+			.unwrap();
+			assert_eq!(uncolored.name, "Keep me");
+			assert_eq!(uncolored.color, 0);
 		}
 		{
 			let snapshot = ready(br#"{"guilds":[{"id":"1","properties":{"owner_id":"7"},
@@ -870,16 +972,30 @@ mod tests {
 				json!({"guilds":[{"id":"1","channels":[{"id":"2","guild_id":"3","type":0}]}]}),
 			);
 			assert!(crossed.channels.is_empty());
-			for roles in [
-				json!([{"id":"1","permissions":"8"},{"id":"1","permissions":"0"}]),
-				json!([{"id":"1","permissions":"8"},{"id":"2","permissions":"invalid"}]),
-			] {
+			for roles in [json!([{"id":"1","permissions":"8"},{"id":"1","permissions":"0"}])] {
 				assert!(
 					snapshot(json!({"guilds":[{"id":"1","roles":roles}]})).guilds[0]
 						.roles
 						.is_none()
 				);
 			}
+			let roles = snapshot(json!({"guilds":[{"id":"1","roles":[
+				{"id":"1","permissions":"8","name":"@everyone"},
+				{"id":"2","permissions":"invalid","name":"Quartzo"},
+				{"id":"3","permissions":"0","name":"Bronze","colors":{"primary_color":"bad"}}
+			]}]}));
+			let roles = roles.guilds[0].roles.as_ref().unwrap();
+			assert_eq!(
+				roles
+					.iter()
+					.map(|role| role.name.as_str())
+					.collect::<Vec<_>>(),
+				["@everyone", "Quartzo", "Bronze"]
+			);
+			assert_eq!(
+				roles[1].bits, 0,
+				"invalid permissions can never grant privileges"
+			);
 			for members in [
 				json!([{"user_id":"9","roles":["2","2"]}]),
 				json!([{"user_id":"9","roles":[]},{"user_id":"9","roles":["2"]}]),
