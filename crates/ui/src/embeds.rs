@@ -6,6 +6,7 @@ use crate::{
 };
 use egui::RichText;
 use model::{Embed, Gif, Message};
+use std::borrow::Cow;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::OnceLock;
 
@@ -134,6 +135,33 @@ fn text(
 		}
 	})
 	.response
+}
+
+/// Bot and webhook bodies can contain emoji names instead of wire emoji tokens. Resolve those
+/// names using only the message's server, leaving a human's literal text untouched.
+pub(crate) fn expanded_message_content<'a>(
+	message: &'a Message,
+	state: &client_core::State,
+) -> Cow<'a, str> {
+	if !(message.author.webhook || message.author.kind != model::AccountKind::Human)
+		|| !message.content.contains(':')
+	{
+		return Cow::Borrowed(&message.content);
+	}
+	let source = crate::mentions::MentionSource {
+		state,
+		channel: message.channel,
+	};
+	let preferred_guild = state
+		.channel(message.channel)
+		.and_then(|channel| channel.guild);
+	Cow::Owned(expand_shortcodes(
+		&message.content,
+		&state.guilds,
+		preferred_guild,
+		message,
+		&source,
+	))
 }
 
 /// Discord's embed text may contain Unicode emoji names even when the wire text is literal.
@@ -1403,6 +1431,52 @@ mod tests {
 			),
 			"<@&834057797645631598> <:Vida:679480364489768970> <@644407668659978248> 👽"
 		);
+	}
+
+	#[test]
+	fn bot_and_webhook_bodies_resolve_only_their_servers_emoji_names() {
+		let mut state = client_core::State::default();
+		state.channels.push(model::Channel {
+			id: model::Id(2),
+			guild: Some(model::Id(1)),
+			name: "synthetic".into(),
+			kind: 0,
+			parent_id: None,
+			position: 0,
+			recipients: Vec::new(),
+			member_list_id: None,
+			tags: None,
+			message_count: None,
+			icon: None,
+			last_message: None,
+		});
+		for (guild, name, emoji_id) in [(1, "warning", 123), (3, "alien", 456)] {
+			state.guilds.push(model::Guild {
+				id: model::Id(guild),
+				name: "Synthetic".into(),
+				emojis: Some(vec![model::CustomEmoji {
+					id: model::Id(emoji_id),
+					name: name.into(),
+					animated: false,
+					available: true,
+					managed: false,
+					roles: None,
+				}]),
+				default_message_notifications: None,
+				stickers: None,
+				icon: None,
+			});
+		}
+		let mut message = test_support::message(1, model::Id(2));
+		message.content = ":warning: :inbox_tray: :alien: `:warning:` :unknown:".into();
+		message.author.kind = model::AccountKind::Bot;
+		let expected = "<:warning:123> 📥 👽 `:warning:` :unknown:";
+		assert_eq!(expanded_message_content(&message, &state), expected);
+		message.author.kind = model::AccountKind::Human;
+		message.author.webhook = true;
+		assert_eq!(expanded_message_content(&message, &state), expected);
+		message.author.webhook = false;
+		assert_eq!(expanded_message_content(&message, &state), message.content);
 	}
 
 	#[test]

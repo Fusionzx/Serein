@@ -1121,6 +1121,12 @@ fn row_key(
 ) -> u64 {
 	let mut key = DefaultHasher::new();
 	layout_key(message).hash(&mut key);
+	if (message.author.webhook || message.author.kind != model::AccountKind::Human)
+		&& message.content.contains(':')
+	{
+		// A newly loaded server emoji can change this row's text width and height.
+		state.catalog_revision().hash(&mut key);
+	}
 	grouped(previous, message, boundary).hash(&mut key);
 	previous
 		.is_none_or(|previous| timestamp(previous.id).date() != timestamp(message.id).date())
@@ -3025,7 +3031,7 @@ impl TimelineView {
 																};
 															let formatted = self
 																.formatted
-																.get(reply, &original.content);
+														.get(reply, &crate::embeds::expanded_message_content(original, state));
 															queue_missing_channel_reference(
 																&mut self.channel_reference_load,
 																formatted,
@@ -3175,7 +3181,9 @@ impl TimelineView {
 											let time = ui
 												.label(
 													RichText::new(
-														crate::local_time::clock_seconds(time),
+														crate::local_time::clock_seconds(
+															crate::local_time::local(time),
+														),
 													)
 													.size(12.0)
 													.color(colors.muted),
@@ -3376,8 +3384,10 @@ impl TimelineView {
 											} else {
 												None
 											};
-											let formatted =
-												self.formatted.get(id, &message.content);
+											let displayed = crate::embeds::expanded_message_content(
+												message, state,
+											);
+											let formatted = self.formatted.get(id, &displayed);
 											let reveal = self
 												.revealed
 												.get(&id)
@@ -3923,6 +3933,18 @@ impl TimelineView {
 						&& !reaction_menu && !egui::Popup::is_any_open(ui.ctx())
 						&& (ui.input(|i| i.pointer.secondary_clicked())
 							|| crate::select::open_menu(ui.ctx()));
+					if let Some(rect) = time_rect {
+						let time = timestamp(id);
+						ui.painter().text(
+							egui::pos2(rect.right() - 2.0, rect.center().y),
+							egui::Align2::RIGHT_CENTER,
+							crate::local_time::clock_seconds(crate::local_time::local(time)),
+							egui::FontId::proportional(10.0),
+							colors.muted,
+						);
+						ui.interact(rect, ui.scope_id().with("timestamp"), egui::Sense::hover())
+							.on_hover_text_with(|| crate::local_time::full(time));
+					}
 					if context_menu
 						|| hovered || focus.has_focus()
 						|| keyboard_focus.as_ref().is_some_and(|r| r.id == focus.id)
@@ -3940,22 +3962,6 @@ impl TimelineView {
 								},
 							),
 						);
-						if let Some(rect) = time_rect {
-							let time = timestamp(id);
-							ui.painter().text(
-								rect.center(),
-								egui::Align2::CENTER_CENTER,
-								crate::local_time::clock(time),
-								egui::FontId::proportional(11.0),
-								colors.muted,
-							);
-							ui.interact(
-								rect,
-								ui.scope_id().with("timestamp"),
-								egui::Sense::hover(),
-							)
-							.on_hover_text_with(|| crate::local_time::full(time));
-						}
 						let own = state
 							.user
 							.as_ref()
@@ -6466,6 +6472,40 @@ mod tests {
 		next.id = Id(86_400_000 << 22);
 		assert!(!grouped(Some(&first), &next, None));
 		assert_eq!(timestamp(Id(u64::MAX)).year(), 2154);
+	}
+	#[test]
+	fn grouped_bot_and_webhook_rows_paint_seconds_without_hover() {
+		let first_ms = (1_700_000_040_u64 - 1_420_070_400) * 1_000;
+		for (kind, webhook) in [
+			(model::AccountKind::Bot, false),
+			(model::AccountKind::Human, true),
+		] {
+			let ctx = egui::Context::default();
+			crate::design::apply(&ctx);
+			let mut state = channel_messages(20, 0);
+			let mut first = text_message(first_ms << 22);
+			first.author.kind = kind;
+			first.author.webhook = webhook;
+			first.content = "First synthetic message".into();
+			let mut second = first.clone();
+			second.id = Id((first_ms + 23_000) << 22);
+			second.content = "Second synthetic message".into();
+			assert!(grouped(Some(&first), &second, None));
+			state.channels[0].last_message = Some(second.id);
+			state.timeline.insert(first, false, false).unwrap();
+			state.timeline.insert(second.clone(), false, false).unwrap();
+			let mut view = TimelineView::default();
+			let mut labels = BTreeMap::new();
+			for frame in 0..3 {
+				labels = paint_timeline(&ctx, &mut view, &mut state, frame);
+			}
+			let seconds =
+				crate::local_time::clock_seconds(crate::local_time::local(timestamp(second.id)));
+			assert!(
+				labels.contains_key(&seconds),
+				"Missing {seconds} in {labels:?}"
+			);
+		}
 	}
 	#[test]
 	fn unsupported_message_fallback_only_requests_confirmation() {
