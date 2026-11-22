@@ -1121,9 +1121,7 @@ fn row_key(
 ) -> u64 {
 	let mut key = DefaultHasher::new();
 	layout_key(message).hash(&mut key);
-	if (message.author.webhook || message.author.kind != model::AccountKind::Human)
-		&& message.content.contains(':')
-	{
+	if message.content.contains(':') {
 		// A newly loaded server emoji can change this row's text width and height.
 		state.catalog_revision().hash(&mut key);
 	}

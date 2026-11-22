@@ -137,15 +137,13 @@ fn text(
 	.response
 }
 
-/// Bot and webhook bodies can contain emoji names instead of wire emoji tokens. Resolve those
-/// names using only the message's server, leaving a human's literal text untouched.
+/// Message bodies can contain emoji names instead of wire emoji tokens. Resolve those names
+/// using only the message's server, while leaving code spans and unknown names untouched.
 pub(crate) fn expanded_message_content<'a>(
 	message: &'a Message,
 	state: &client_core::State,
 ) -> Cow<'a, str> {
-	if !(message.author.webhook || message.author.kind != model::AccountKind::Human)
-		|| !message.content.contains(':')
-	{
+	if !message.content.contains(':') {
 		return Cow::Borrowed(&message.content);
 	}
 	let source = crate::mentions::MentionSource {
@@ -1434,7 +1432,7 @@ mod tests {
 	}
 
 	#[test]
-	fn bot_and_webhook_bodies_resolve_only_their_servers_emoji_names() {
+	fn message_bodies_resolve_shortcodes_only_from_their_server() {
 		let mut state = client_core::State::default();
 		state.channels.push(model::Channel {
 			id: model::Id(2),
@@ -1476,7 +1474,8 @@ mod tests {
 		message.author.webhook = true;
 		assert_eq!(expanded_message_content(&message, &state), expected);
 		message.author.webhook = false;
-		assert_eq!(expanded_message_content(&message, &state), message.content);
+		message.author.kind = model::AccountKind::Human;
+		assert_eq!(expanded_message_content(&message, &state), expected);
 	}
 
 	#[test]
