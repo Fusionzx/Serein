@@ -48,6 +48,8 @@ pub struct AppPreferences {
 	pub hide_nitro_emojis: bool,
 	/// Device-local opt-in; older saved preferences deserialize with conversion off.
 	pub convert_emoticons: bool,
+	/// Send no typing indicator while writing; others' indicators still show.
+	pub hide_own_typing: bool,
 	/// Request a conversation's page while the pointer rests on it; older preferences enable it.
 	pub preload_on_hover: bool,
 	/// Show as Idle after 10 minutes of system inactivity; older preferences enable it.
@@ -106,6 +108,7 @@ impl Default for AppPreferences {
 			show_hidden_channels: false,
 			hide_nitro_emojis: false,
 			convert_emoticons: false,
+			hide_own_typing: false,
 			preload_on_hover: true,
 			auto_idle: true,
 			hide_title_bar: false,
@@ -2138,6 +2141,27 @@ mod tests {
 			}
 			let store = LocalStore::open(&path).unwrap();
 			assert_eq!(store.app_preferences().unwrap().convert_emoticons, enabled);
+		}
+		std::fs::remove_dir_all(root).unwrap();
+	}
+
+	#[test]
+	fn own_typing_indicator_defaults_on_and_preference_persists_across_reopens() {
+		let legacy: AppPreferences = serde_json::from_str("{}").unwrap();
+		assert!(!legacy.hide_own_typing);
+		let root = std::env::temp_dir().join(format!("serein-typing-pref-{}", std::process::id()));
+		std::fs::create_dir(&root).unwrap();
+		let path = root.join("preferences.sqlite3");
+		for hidden in [true, false] {
+			{
+				let store = LocalStore::open(&path).unwrap();
+				let mut preferences = store.app_preferences().unwrap();
+				assert_eq!(preferences.hide_own_typing, !hidden);
+				preferences.hide_own_typing = hidden;
+				store.save_app_preferences(&preferences).unwrap();
+			}
+			let store = LocalStore::open(&path).unwrap();
+			assert_eq!(store.app_preferences().unwrap().hide_own_typing, hidden);
 		}
 		std::fs::remove_dir_all(root).unwrap();
 	}

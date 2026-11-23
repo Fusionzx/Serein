@@ -3489,6 +3489,12 @@ settings-appearance-settings-window-effects = Efeitos de janela
 # Context: appearance_settings
 settings-appearance-settings-the-system-applies-its-standard-blur-strength = O sistema aplica sua intensidade de desfoque padrão.
 # Context: chat_settings
+settings-chat-messaging = Mensagens
+# Context: chat_settings
+settings-share-typing = Permitir que outras pessoas vejam quando você está digitando
+# Context: chat_settings
+settings-share-typing-description = O Discord mostra "digitando…" enquanto você escreve. Você continuará vendo quando outras pessoas digitarem.
+# Context: chat_settings
 settings-chat-settings-channel-list = Lista de canais
 # Context: chat_settings
 settings-chat-settings-show-channels-you-cannot-currently-access = Mostrar canais que você não pode acessar no momento.

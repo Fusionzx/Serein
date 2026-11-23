@@ -256,6 +256,8 @@ pub struct MessagingUi {
 	pub language: i18n::Language,
 	forwarding: forwarding::ForwardDialog,
 	pub convert_emoticons: bool,
+	/// Device preference: do not tell other users when this account is typing.
+	pub hide_own_typing: bool,
 	/// Device preference: request a conversation's page while the pointer rests on it.
 	pub preload_on_hover: bool,
 	preload: preload::Preload,
@@ -3951,7 +3953,8 @@ impl MessagingUi {
                             } else {
                                 self.draft_changes.push(channel);
                                 // Tell the conversation, as the official client does.
-                                if edit.changed()
+								if edit.changed()
+									&& !self.hide_own_typing
                                     && let Some(command) =
                                         state.prepare_typing(channel, std::time::Instant::now())
                                 {
@@ -6729,6 +6732,37 @@ mod composer_tests {
 			typed("i", &mut state),
 			0,
 			"throttled while Discord still shows it"
+		);
+	}
+
+	#[test]
+	fn hiding_own_typing_does_not_send_an_indicator() {
+		let ctx = egui::Context::default();
+		let mut state = edit_state();
+		state.gateway_connected = true;
+		let channel = state.selected.unwrap();
+		let mut view = MessagingUi {
+			hide_own_typing: true,
+			..Default::default()
+		};
+		ctx.run_ui(Default::default(), |ui| {
+			view.composer(ui, &mut state, channel, &ctx, &mut vec![]);
+			ctx.memory_mut(|m| m.request_focus(ui.make_persistent_id("message-input")));
+		})
+		.drop_without_applying_deltas();
+		let mut commands = vec![];
+		ctx.run_ui(
+			egui::RawInput {
+				events: vec![egui::Event::Text("hello".into())],
+				..Default::default()
+			},
+			|ui| view.composer(ui, &mut state, channel, &ctx, &mut commands),
+		)
+		.drop_without_applying_deltas();
+		assert!(
+			!commands
+				.iter()
+				.any(|command| matches!(command, Command::Typing { .. }))
 		);
 	}
 

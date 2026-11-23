@@ -54,6 +54,7 @@ impl Settings {
 			show_hidden_channels: ui.show_hidden_channels,
 			hide_nitro_emojis: ui.hide_nitro_emojis,
 			convert_emoticons: ui.convert_emoticons,
+			hide_own_typing: ui.hide_own_typing,
 			preload_on_hover: ui.preload_on_hover,
 			auto_idle: ui.auto_idle,
 			hide_title_bar: ui.hide_title_bar,
@@ -105,6 +106,7 @@ impl Settings {
 		ui.show_hidden_channels = value.show_hidden_channels;
 		ui.hide_nitro_emojis = value.hide_nitro_emojis;
 		ui.convert_emoticons = value.convert_emoticons;
+		ui.hide_own_typing = value.hide_own_typing;
 		ui.preload_on_hover = value.preload_on_hover;
 		ui.auto_idle = value.auto_idle;
 		ui.hide_title_bar = value.hide_title_bar;
@@ -442,6 +444,23 @@ mod tests {
 		settings.observe(&ui);
 		assert!(!settings.current.message_requests_collapsed);
 		assert!(settings.state.dirty);
+	}
+
+	#[test]
+	fn own_typing_preference_roundtrips_between_ui_and_device_settings() {
+		let mut settings = Settings {
+			loaded: true,
+			..Default::default()
+		};
+		let mut ui = ui::MessagingUi::default();
+		ui.hide_own_typing = true;
+		settings.observe(&ui);
+		assert!(settings.current.hide_own_typing);
+		assert!(settings.state.dirty);
+
+		ui.hide_own_typing = false;
+		settings.apply(&mut ui);
+		assert!(ui.hide_own_typing);
 	}
 
 	#[test]

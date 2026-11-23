@@ -48,6 +48,8 @@ pub fn decode_bundled_svg(source: &[u8]) -> Option<Vec<u8>> {
 }
 
 static ENTRIES: OnceLock<Vec<(&'static str, usize)>> = OnceLock::new();
+const ATLAS_COLUMNS: usize = 64;
+const ATLAS_CELL: f32 = 32.0;
 
 fn entries() -> &'static [(&'static str, usize)] {
 	ENTRIES.get_or_init(|| {
@@ -125,6 +127,11 @@ pub(crate) fn lookup(text: &str) -> Option<usize> {
 	if text.is_ascii() || text.contains('\u{fe0e}') || text.len() > 128 {
 		return None;
 	}
+	// Copyright, registered and trademark signs default to text in ordinary prose. Only
+	// their explicit emoji-presentation forms (for example `©️`) should use Twemoji artwork.
+	if !text.contains('\u{fe0f}') && matches!(text, "©" | "®" | "™") {
+		return None;
+	}
 	let mut normalized = [0; 128];
 	let key = if text.contains('\u{fe0f}') {
 		let mut len = 0;
@@ -157,15 +164,25 @@ pub(crate) fn image_cell(
 	cell: usize,
 	size: f32,
 ) -> Image<'static> {
-	let x = (cell % 64) as f32 * 32.0;
-	let y = (cell / 64) as f32 * 32.0;
-	let uv = egui::Rect::from_min_max(
-		egui::pos2(x / atlas.size.x, y / atlas.size.y),
-		egui::pos2((x + 32.0) / atlas.size.x, (y + 32.0) / atlas.size.y),
-	);
+	let uv = atlas_cell_uv(atlas.size, cell);
 	Image::new((atlas.id, egui::Vec2::splat(size)))
 		.uv(uv)
 		.alt_text(text)
+}
+
+fn atlas_cell_uv(texture_size: egui::Vec2, cell: usize) -> egui::Rect {
+	let x = (cell % ATLAS_COLUMNS) as f32 * ATLAS_CELL;
+	let y = (cell / ATLAS_COLUMNS) as f32 * ATLAS_CELL;
+	// Sample texel centers rather than cell edges. With linear filtering, this prevents
+	// pixels from the adjacent Twemoji atlas cell bleeding into glyphs.
+	let inset = 0.5;
+	egui::Rect::from_min_max(
+		egui::pos2((x + inset) / texture_size.x, (y + inset) / texture_size.y),
+		egui::pos2(
+			(x + ATLAS_CELL - inset) / texture_size.x,
+			(y + ATLAS_CELL - inset) / texture_size.y,
+		),
+	)
 }
 
 pub(crate) fn button(ctx: &Context, emoji: &str, text: String) -> egui::Button<'static> {
@@ -278,12 +295,48 @@ mod tests {
 				.iter()
 				.all(|(_, cell)| *cell < (image.width() / 32 * (image.height() / 32)) as usize)
 		);
-		for text in ["👍", "👍🏽", "❤️", "👩🏽‍💻", "🇨🇿", "1️⃣", "🏳️‍🌈", "🏳‍🌈", "👩‍⚕", "👨‍👩‍👧‍👦"]
-		{
+		for text in [
+			"👍",
+			"👍🏽",
+			"❤️",
+			"👩🏽‍💻",
+			"🇨🇿",
+			"1️⃣",
+			"🏳️‍🌈",
+			"🏳‍🌈",
+			"👩‍⚕",
+			"👨‍👩‍👧‍👦",
+			"©️",
+			"®️",
+			"™️",
+		] {
 			assert!(lookup(text).is_some(), "missing {text}");
 		}
-		for text in ["hello", "1", "©\u{fe0e}", "👩\u{200d}🦀", "<:custom:123>"] {
+		for text in [
+			"hello",
+			"1",
+			"©",
+			"®",
+			"™",
+			"©\u{fe0e}",
+			"👩\u{200d}🦀",
+			"<:custom:123>",
+		] {
 			assert!(lookup(text).is_none(), "unexpected {text}");
+		}
+	}
+	#[test]
+	fn atlas_uvs_stay_inside_the_cell_and_sample_texel_centers() {
+		let image = image::load_from_memory(ATLAS).unwrap();
+		let texture_size = egui::vec2(image.width() as f32, image.height() as f32);
+		for cell in [0, 12, 2075, 4008] {
+			let uv = atlas_cell_uv(texture_size, cell);
+			let x = (cell % ATLAS_COLUMNS) as f32 * ATLAS_CELL;
+			let y = (cell / ATLAS_COLUMNS) as f32 * ATLAS_CELL;
+			assert!((uv.min.x * texture_size.x - (x + 0.5)).abs() < 0.001);
+			assert!((uv.min.y * texture_size.y - (y + 0.5)).abs() < 0.001);
+			assert!((uv.max.x * texture_size.x - (x + 31.5)).abs() < 0.001);
+			assert!((uv.max.y * texture_size.y - (y + 31.5)).abs() < 0.001);
 		}
 	}
 }

@@ -139,7 +139,7 @@ impl Page {
 				"appearance customization font typography import ttf otf primary accent hex window effects transparency blur theme dark light system mode zoom scale layout sidebar width people members member list reset colour color preset"
 			}
 			Self::Chat => {
-				"chat messages media reading animate animated gifs autoplay hide image links confirm confirmation external browser smooth scrolling scroll speed motion trackpad wheel hidden channels channel list reset emoji emojis nitro fake suggestions autocomplete locked emoticons chat box automatically convert"
+				"chat messages media reading animate animated gifs autoplay hide image links confirm confirmation external browser smooth scrolling scroll speed motion trackpad wheel hidden channels channel list reset emoji emojis nitro fake suggestions autocomplete locked emoticons chat box automatically convert typing indicator privacy"
 			}
 			Self::MessagingPermissions => {
 				"messaging permissions spam filters direct messages dm friend requests personalized connected games"
@@ -1128,6 +1128,20 @@ impl MessagingUi {
 
 	/// Shows device-local reading, composer and channel-list preferences.
 	fn chat_settings(&mut self, ui: &mut egui::Ui, demo: bool) {
+		design::group(
+			ui,
+			&crate::i18n::translate("settings-chat-messaging"),
+			|ui| {
+				let mut share_typing = !self.hide_own_typing;
+				design::switch(
+					ui,
+					"settings-share-typing",
+					Some("settings-share-typing-description"),
+					&mut share_typing,
+				);
+				self.hide_own_typing = !share_typing;
+			},
+		);
 		self.chat_reading_settings(ui, demo);
 		design::group(ui, &crate::i18n::translate("settings-chat-box"), |ui| {
 			design::switch(
